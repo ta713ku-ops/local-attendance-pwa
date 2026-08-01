@@ -1,0 +1,3 @@
+import type { ForgeConfig } from '@electron-forge/shared-types';
+const config: ForgeConfig = { packagerConfig: { asar: true, appBundleId: 'com.taku.localattendance' }, makers: [{ name: '@electron-forge/maker-squirrel', config: { name: 'local_attendance' } }], plugins: [{ name: '@electron-forge/plugin-auto-unpack-natives', config: {} }, { name: '@electron-forge/plugin-webpack', config: { mainConfig: './webpack.main.config.ts', renderer: { config: './webpack.renderer.config.ts', entryPoints: [{ html: './src/renderer/index.html', js: './src/renderer/index.tsx', name: 'main_window', preload: { js: './src/preload/index.ts' } }] } } }] };
+export default config;

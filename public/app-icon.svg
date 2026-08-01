@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="ローカル勤怠">
+  <rect width="512" height="512" rx="104" fill="#072C2C"/>
+  <path d="M256 104a152 152 0 1 0 0 304 152 152 0 0 0 0-304Zm0 38a114 114 0 1 1 0 228 114 114 0 0 1 0-228Zm-19 43h38v82l63 38-19 32-81-49V185Z" fill="#EDEADE"/>
+  <circle cx="382" cy="130" r="34" fill="#FF5F03"/>
+</svg>

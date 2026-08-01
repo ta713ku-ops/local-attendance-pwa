@@ -1,0 +1,26 @@
+{
+  "name": "ローカル勤怠・給与見込み管理",
+  "short_name": "ローカル勤怠",
+  "description": "iPhone内に保存して使う、オフライン対応の勤怠管理アプリです。",
+  "lang": "ja",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EDEADE",
+  "theme_color": "#072C2C",
+  "icons": [
+    {
+      "src": "/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
