@@ -2,43 +2,27 @@
   "name": "local-attendance",
   "productName": "ローカル勤怠・給与見込み管理",
   "version": "0.2.0",
-  "main": ".webpack/main",
   "scripts": {
     "start": "vite --host 0.0.0.0",
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "build:pwa": "vite build",
     "preview:pwa": "vite preview --host 0.0.0.0",
-    "start:desktop": "electron-forge start",
-    "package:desktop": "electron-forge package",
-    "make:desktop": "electron-forge make",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run tests/domain tests/shared",
+    "test:watch": "vitest tests/domain tests/shared"
   },
   "devDependencies": {
-    "@electron-forge/cli": "7.11.2",
-    "@electron-forge/maker-squirrel": "7.11.2",
-    "@electron-forge/plugin-webpack": "7.11.2",
-    "@electron-forge/plugin-auto-unpack-natives": "7.11.2",
-    "@types/better-sqlite3": "7.6.13",
     "@types/node": "22.15.3",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
-    "css-loader": "7.1.2",
-    "electron": "43.2.0",
-    "style-loader": "4.0.0",
-    "ts-loader": "9.5.2",
     "typescript": "5.8.3",
     "vite": "6.4.3",
-    "vitest": "3.1.4",
-    "webpack": "5.99.8"
+    "vitest": "3.1.4"
   },
   "dependencies": {
-    "better-sqlite3": "13.0.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "zod": "3.24.3"
+    "react-dom": "19.2.8"
   }
 }

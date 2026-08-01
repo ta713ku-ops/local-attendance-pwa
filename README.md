@@ -22,7 +22,7 @@ npm run build:pwa
 npm run preview:pwa
 ```
 
-旧Electron版は移行確認用として残しています。必要な場合だけ `npm run start:desktop` で起動できます。
+旧Electron版のソースは移行時の参照用として残していますが、現在の実行・納品対象はiPhone PWAだけです。
 
 ## 初回運用
 

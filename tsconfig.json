@@ -1,1 +1,21 @@
-{"compilerOptions":{"target":"ES2022","module":"commonjs","moduleResolution":"node","strict":true,"esModuleInterop":true,"skipLibCheck":true,"jsx":"react-jsx","resolveJsonModule":true,"types":["node"]},"include":["src","*.ts"]}
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "src/domain",
+    "src/shared",
+    "src/pwa",
+    "tests/domain",
+    "tests/shared",
+    "vite.config.ts"
+  ]
+}
