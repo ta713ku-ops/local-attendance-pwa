@@ -5,8 +5,8 @@
   "scripts": {
     "start": "vite --host 0.0.0.0",
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
-    "build:pwa": "vite build",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "build:pwa": "vite build && node scripts/prepare-sites-build.mjs",
     "preview:pwa": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
