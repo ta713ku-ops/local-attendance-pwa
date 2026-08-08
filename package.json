@@ -5,23 +5,26 @@
   "scripts": {
     "start": "vite --host 0.0.0.0",
     "dev": "vite --host 0.0.0.0",
-    "build": "vite build && node scripts/prepare-sites-build.mjs",
-    "build:pwa": "vite build && node scripts/prepare-sites-build.mjs",
+    "build": "vite build && node scripts/prepare-pages-build.mjs && node scripts/verify-pages-build.mjs",
+    "build:pwa": "npm run build",
+    "build:sites": "VITE_BASE_PATH=/ vite build && node scripts/prepare-sites-build.mjs && node scripts/verify-sites-build.mjs",
     "preview:pwa": "vite preview --host 0.0.0.0",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run tests/domain tests/shared",
-    "test:watch": "vitest tests/domain tests/shared"
+    "test": "vitest run tests/domain tests/shared tests/pwa",
+    "test:watch": "vitest tests/domain tests/shared tests/pwa"
   },
   "devDependencies": {
     "@types/node": "22.15.3",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
+    "fake-indexeddb": "^6.2.2",
     "typescript": "5.8.3",
     "vite": "6.4.3",
     "vitest": "3.1.4"
   },
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   }

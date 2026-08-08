@@ -37,6 +37,10 @@ export interface CalculatedShift {
   regularMinutes: number;
   /** Integer units of 1/240 yen. */
   pay240thYen: number;
+  /** Regular-work pay, kept exactly in integer units of 1/240 yen. */
+  regularPay240thYen: number;
+  /** Night-work pay (base plus 25% premium), in integer units of 1/240 yen. */
+  nightPay240thYen: number;
 }
 
 export function toEpochMs(value: Instant): number {
@@ -103,6 +107,7 @@ export function calculateShift(input: ShiftCalculationInput): CalculatedShift {
     status: 'NEEDS_REVIEW', clockInMs, clockOutMs, roundedClockInMs, roundedClockOutMs,
     calculationMethod, workDateJst: formatJstDate(clockInMs), monthJst: formatJstMonth(clockInMs),
     totalMinutes: 0, nightMinutes: 0, regularMinutes: 0, pay240thYen: 0,
+    regularPay240thYen: 0, nightPay240thYen: 0,
   };
   // The short-shift exception only applies after an explicit approval.
   if (endMs <= startMs) return { ...base, reviewReason: 'NON_POSITIVE_ROUNDED_DURATION' };
@@ -115,8 +120,11 @@ export function calculateShift(input: ShiftCalculationInput): CalculatedShift {
   const nightMinutes = calculateNightMinutes(startMs, endMs);
   // base pay: minutes * wage / 60; premium: night minutes * wage * .25 / 60.
   // Multiplication by 240 removes both denominators exactly.
-  const pay240thYen = totalMinutes * input.hourlyWageYen * 4 + nightMinutes * input.hourlyWageYen;
-  return { ...base, status: 'CALCULATED', totalMinutes, nightMinutes, regularMinutes: totalMinutes - nightMinutes, pay240thYen };
+  const regularMinutes = totalMinutes - nightMinutes;
+  const regularPay240thYen = regularMinutes * input.hourlyWageYen * 4;
+  const nightPay240thYen = nightMinutes * input.hourlyWageYen * 5;
+  const pay240thYen = regularPay240thYen + nightPay240thYen;
+  return { ...base, status: 'CALCULATED', totalMinutes, nightMinutes, regularMinutes, pay240thYen, regularPay240thYen, nightPay240thYen };
 }
 
 export interface MonthlyPaySummary {
@@ -144,6 +152,101 @@ export function summarizeEmployeeMonth(employeeId: string, monthJst: string, shi
   const sum = (key: keyof Pick<MonthlyShift, 'totalMinutes' | 'regularMinutes' | 'nightMinutes' | 'pay240thYen'>) => included.reduce((total, shift) => total + shift[key], 0);
   const pay240thYen = sum('pay240thYen');
   return { employeeId, monthJst, totalMinutes: sum('totalMinutes'), regularMinutes: sum('regularMinutes'), nightMinutes: sum('nightMinutes'), pay240thYen, roundedYen: round240thYenHalfUp(pay240thYen) };
+}
+
+export type PayBreakdownComponent = 'REGULAR' | 'NIGHT';
+
+/** A closed, reviewed shift eligible for employee-month rounding allocation. */
+export interface PayAllocationShift {
+  shiftId: string;
+  employeeId: string;
+  status: CalculationStatus | 'WORKING';
+  /** The effective clock-in instant (actual or approved correction). */
+  effectiveClockIn: Instant;
+  /** Exact component amounts; integer units of 1/240 yen. */
+  regularPay240thYen: number;
+  nightPay240thYen: number;
+}
+
+export interface AllocatedPayComponent {
+  component: PayBreakdownComponent;
+  exact240thYen: number;
+  /** Whole-yen amount after employee-month rounding and remainder allocation. */
+  allocatedYen: number;
+}
+
+export interface AllocatedShiftPay {
+  shiftId: string;
+  effectiveWorkDateJst: string;
+  effectiveClockInMs: number;
+  regular: AllocatedPayComponent;
+  night: AllocatedPayComponent;
+  allocatedYen: number;
+}
+
+export interface EmployeeMonthPayAllocation {
+  employeeId: string;
+  monthJst: string;
+  exact240thYen: number;
+  roundedYen: number;
+  shifts: AllocatedShiftPay[];
+}
+
+/**
+ * Rounds once per employee-month, then deterministically assigns the remaining
+ * yen to shift components by: remainder desc, work date asc, clock-in asc,
+ * shift id asc, and REGULAR before NIGHT within the same shift.
+ * WORKING and NEEDS_REVIEW records are intentionally excluded.
+ */
+export function allocateEmployeeMonthPay(
+  employeeId: string,
+  monthJst: string,
+  shifts: readonly PayAllocationShift[],
+): EmployeeMonthPayAllocation {
+  type Candidate = {
+    shift: PayAllocationShift;
+    component: PayBreakdownComponent;
+    exact240thYen: number;
+    effectiveClockInMs: number;
+    effectiveWorkDateJst: string;
+    baseYen: number;
+    remainder: number;
+  };
+  const candidates: Candidate[] = [];
+  for (const shift of shifts) {
+    const effectiveClockInMs = toEpochMs(shift.effectiveClockIn);
+    if (shift.employeeId !== employeeId || shift.status !== 'CALCULATED' || formatJstMonth(effectiveClockInMs) !== monthJst) continue;
+    for (const [component, exact240thYen] of [['REGULAR', shift.regularPay240thYen], ['NIGHT', shift.nightPay240thYen]] as const) {
+      if (!Number.isSafeInteger(exact240thYen) || exact240thYen < 0) throw new RangeError('component pay must be a non-negative safe integer');
+      candidates.push({ shift, component, exact240thYen, effectiveClockInMs, effectiveWorkDateJst: formatJstDate(effectiveClockInMs), baseYen: Math.floor(exact240thYen / 240), remainder: exact240thYen % 240 });
+    }
+  }
+  const exact240thYen = candidates.reduce((sum, item) => sum + item.exact240thYen, 0);
+  if (!Number.isSafeInteger(exact240thYen)) throw new RangeError('employee-month pay exceeds safe integer range');
+  const roundedYen = round240thYenHalfUp(exact240thYen);
+  const allocated = new Map<Candidate, number>(candidates.map((item) => [item, item.baseYen]));
+  let remainingYen = roundedYen - candidates.reduce((sum, item) => sum + item.baseYen, 0);
+  const ranked = [...candidates].sort((a, b) =>
+    b.remainder - a.remainder
+    || a.effectiveWorkDateJst.localeCompare(b.effectiveWorkDateJst)
+    || a.effectiveClockInMs - b.effectiveClockInMs
+    || a.shift.shiftId.localeCompare(b.shift.shiftId)
+    || (a.component === b.component ? 0 : a.component === 'REGULAR' ? -1 : 1));
+  for (let index = 0; index < remainingYen; index += 1) allocated.set(ranked[index], ranked[index].baseYen + 1);
+
+  const byShift = new Map<string, AllocatedShiftPay>();
+  for (const item of candidates) {
+    const component: AllocatedPayComponent = { component: item.component, exact240thYen: item.exact240thYen, allocatedYen: allocated.get(item)! };
+    const current = byShift.get(item.shift.shiftId) ?? {
+      shiftId: item.shift.shiftId, effectiveWorkDateJst: item.effectiveWorkDateJst, effectiveClockInMs: item.effectiveClockInMs,
+      regular: { component: 'REGULAR' as const, exact240thYen: 0, allocatedYen: 0 },
+      night: { component: 'NIGHT' as const, exact240thYen: 0, allocatedYen: 0 }, allocatedYen: 0,
+    };
+    if (item.component === 'REGULAR') current.regular = component; else current.night = component;
+    current.allocatedYen += component.allocatedYen;
+    byShift.set(item.shift.shiftId, current);
+  }
+  return { employeeId, monthJst, exact240thYen, roundedYen, shifts: [...byShift.values()].sort((a, b) => a.effectiveClockInMs - b.effectiveClockInMs || a.shiftId.localeCompare(b.shiftId)) };
 }
 
 export type EmployeeAttendanceStatus = 'READY_TO_CLOCK_IN' | 'WORKING' | 'LONG_SHIFT_WARNING' | 'REENTRY_CONFIRMATION' | 'ARCHIVED' | 'MONTH_CLOSED';

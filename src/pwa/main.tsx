@@ -25,7 +25,11 @@ const registerServiceWorker = async () => {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
 
   try {
-    const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    const baseUrl = new URL(import.meta.env.BASE_URL, window.location.origin);
+    const registration = await navigator.serviceWorker.register(
+      new URL('sw.js', baseUrl),
+      { scope: baseUrl.pathname },
+    );
     announceUpdate(registration);
     registration.addEventListener('updatefound', () => {
       const worker = registration.installing;
@@ -56,7 +60,11 @@ const start = async () => {
   window.addEventListener('offline', setConnectionState);
 
   try {
-    await installWebAttendanceApi();
+    const controller = await installWebAttendanceApi();
+    void controller.ensureAutoBackup();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void controller.ensureAutoBackup();
+    });
   } catch (error) {
     console.error('ローカル勤怠データを開始できませんでした。', error);
   }

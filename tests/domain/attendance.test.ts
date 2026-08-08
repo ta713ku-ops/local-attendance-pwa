@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { calculateNightMinutes, calculateShift, decideClockAction, formatJstDate, getAttendanceStatus, roundClockInUp, roundClockOutDown, summarizeEmployeeMonth } from '../../src/domain';
+import { allocateEmployeeMonthPay, calculateNightMinutes, calculateShift, decideClockAction, formatJstDate, getAttendanceStatus, roundClockInUp, roundClockOutDown, summarizeEmployeeMonth, type PayAllocationShift } from '../../src/domain';
 
 const at = (value: string) => new Date(value).getTime();
 
@@ -40,7 +40,13 @@ describe('calculation and night work', () => {
     const b = calculateShift({ clockIn: '2024-01-02T09:00:00+09:00', clockOut: '2024-01-02T09:01:00+09:00', hourlyWageYen: 1001, approvedActualMinutes: true });
     const summary = summarizeEmployeeMonth('e1', '2024-01', [{ employeeId: 'e1', ...a }, { employeeId: 'e1', ...b }]);
     expect(a.pay240thYen).toBe(4004);
+    expect(a).toMatchObject({ regularPay240thYen: 4004, nightPay240thYen: 0 });
     expect(summary).toMatchObject({ totalMinutes: 2, pay240thYen: 8008, roundedYen: 33 });
+  });
+
+  it('keeps regular and night pay exact across a night boundary', () => {
+    const result = calculateShift({ clockIn: '2024-01-01T21:30:00+09:00', clockOut: '2024-01-02T05:30:00+09:00', hourlyWageYen: 1001 });
+    expect(result).toMatchObject({ regularMinutes: 60, nightMinutes: 420, regularPay240thYen: 240240, nightPay240thYen: 2102100, pay240thYen: 2342340 });
   });
 
   it('requires review from the source timestamps when a 24-hour-plus shift rounds below 24 hours', () => {
@@ -50,6 +56,52 @@ describe('calculation and night work', () => {
     expect(review).toMatchObject({ status: 'NEEDS_REVIEW', reviewReason: 'OVER_24_HOURS' });
     // The rounded interval is only 23.5 hours, but management approval permits it.
     expect(calculateShift({ clockIn: '2024-02-28T00:01:00+09:00', clockOut: '2024-02-29T00:02:00+09:00', hourlyWageYen: 1000, approvedLongShiftReview: true }).status).toBe('CALCULATED');
+  });
+});
+
+describe('employee-month pay allocation', () => {
+  const shift = (overrides: Partial<PayAllocationShift> & Pick<PayAllocationShift, 'shiftId' | 'effectiveClockIn'>): PayAllocationShift => ({
+    employeeId: 'e1', status: 'CALCULATED', regularPay240thYen: 0, nightPay240thYen: 0, ...overrides,
+  });
+
+  it('uses effective clock-in month and excludes working, review, and other employees', () => {
+    const result = allocateEmployeeMonthPay('e1', '2024-01', [
+      shift({ shiftId: 'cross-month', effectiveClockIn: '2024-01-31T23:50:00+09:00', regularPay240thYen: 240 }),
+      shift({ shiftId: 'working', effectiveClockIn: '2024-01-02T09:00:00+09:00', status: 'WORKING', regularPay240thYen: 24000 }),
+      shift({ shiftId: 'review', effectiveClockIn: '2024-01-02T09:00:00+09:00', status: 'NEEDS_REVIEW', regularPay240thYen: 24000 }),
+      shift({ shiftId: 'other', effectiveClockIn: '2024-01-02T09:00:00+09:00', employeeId: 'e2', regularPay240thYen: 24000 }),
+    ]);
+    expect(result).toMatchObject({ exact240thYen: 240, roundedYen: 1 });
+    expect(result.shifts.map((item) => item.shiftId)).toEqual(['cross-month']);
+  });
+
+  it('allocates by remainder, then date, clock-in, shift id, and regular before night', () => {
+    const result = allocateEmployeeMonthPay('e1', '2024-01', [
+      shift({ shiftId: 'later-date', effectiveClockIn: '2024-01-03T08:00:00+09:00', regularPay240thYen: 121 }),
+      shift({ shiftId: 'b', effectiveClockIn: '2024-01-02T09:00:00+09:00', regularPay240thYen: 121 }),
+      shift({ shiftId: 'a', effectiveClockIn: '2024-01-02T09:00:00+09:00', regularPay240thYen: 121, nightPay240thYen: 121 }),
+      shift({ shiftId: 'earlier-clock', effectiveClockIn: '2024-01-02T08:00:00+09:00', regularPay240thYen: 121 }),
+      shift({ shiftId: 'large-remainder', effectiveClockIn: '2024-01-04T08:00:00+09:00', regularPay240thYen: 239 }),
+    ]);
+    expect(result.roundedYen).toBe(4);
+    const amounts = Object.fromEntries(result.shifts.map((item) => [item.shiftId, [item.regular.allocatedYen, item.night.allocatedYen]]));
+    expect(amounts).toEqual({ 'earlier-clock': [1, 0], a: [1, 1], b: [0, 0], 'later-date': [0, 0], 'large-remainder': [1, 0] });
+    expect(result.shifts.flatMap((item) => [item.regular.allocatedYen, item.night.allocatedYen]).reduce((a, b) => a + b, 0)).toBe(result.roundedYen);
+
+    const componentTie = allocateEmployeeMonthPay('e1', '2024-01', [
+      shift({ shiftId: 'same-shift', effectiveClockIn: '2024-01-01T09:00:00+09:00', regularPay240thYen: 120, nightPay240thYen: 120 }),
+    ]);
+    expect(componentTie.shifts[0]).toMatchObject({ regular: { allocatedYen: 1 }, night: { allocatedYen: 0 } });
+  });
+
+  it('handles same-day multiple short shifts and amounts containing whole yen', () => {
+    const result = allocateEmployeeMonthPay('e1', '2024-01', [
+      shift({ shiftId: 'short-1', effectiveClockIn: '2024-01-10T09:00:00+09:00', regularPay240thYen: 4004 }),
+      shift({ shiftId: 'short-2', effectiveClockIn: '2024-01-10T10:00:00+09:00', regularPay240thYen: 4004 }),
+      shift({ shiftId: 'whole', effectiveClockIn: '2024-01-10T11:00:00+09:00', nightPay240thYen: 240 }),
+    ]);
+    expect(result).toMatchObject({ exact240thYen: 8248, roundedYen: 34 });
+    expect(result.shifts.reduce((sum, item) => sum + item.allocatedYen, 0)).toBe(34);
   });
 });
 
