@@ -210,6 +210,7 @@ export interface PwaAttendanceApi {
   attendance: {
     calendar(month: string): Promise<Result<AttendanceCalendarDto>>;
     day(date: string): Promise<Result<AttendanceDayDto>>;
+    createShift(input: Command<{ employeeId: string; workDate: string; startAt: number; endAt: number }>): Promise<Result<AttendanceShiftDto>>;
     correctionEmployees(): Promise<Result<EmployeeDto[]>>;
     correctionShifts(employeeId: string): Promise<Result<CorrectionListItemDto[]>>;
     correctionDetail(shiftId: string): Promise<Result<CorrectionDetailDto>>;

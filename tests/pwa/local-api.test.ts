@@ -134,6 +134,54 @@ describe('PWA local API', () => {
     expect(listed.ok && listed.data.find((row) => row.id === 'legacy')?.nightHourlyWage).toBeNull();
   });
 
+  it('creates an idempotent completed shift with wage snapshots and reflects it in attendance and payroll', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'existing', name: '既存', hourly_wage: 900, status: 'ACTIVE' } satisfies LocalEmployee);
+    await put(dbName, 'employees', { id: 'e1', name: '山田', hourly_wage: 1177, night_hourly_wage: 1471, status: 'ACTIVE' } satisfies LocalEmployee);
+    await put(dbName, 'shifts', { id: 'existing-shift', employee_id: 'existing', business_date: '2026-07-31', clock_in: at('2026-07-31T00:00:00Z'), clock_out: at('2026-07-31T01:00:00Z'), wage_snapshot: 900 } satisfies LocalShift);
+    const requestId = 'manual-shift-once';
+    const input = { employeeId: 'e1', workDate: '2026-08-01', startAt: at('2026-08-01T14:00:00Z'), endAt: at('2026-08-01T20:00:00Z'), requestId };
+
+    const first = await controller.api.attendance.createShift(input);
+    const repeated = await controller.api.attendance.createShift(input);
+
+    expect(first.ok).toBe(true);
+    expect(repeated).toEqual(first);
+    if (!first.ok) return;
+    expect(first.data).toMatchObject({ employeeId: 'e1', employeeName: '山田', workDate: '2026-08-01', effectiveClockIn: input.startAt, effectiveClockOut: input.endAt, state: 'CALCULATED' });
+    const stored = await all<LocalShift>(dbName, 'shifts');
+    expect(stored).toHaveLength(2);
+    expect(stored.find((row) => row.id === 'existing-shift')).toMatchObject({ employee_id: 'existing', wage_snapshot: 900 });
+    expect(stored.find((row) => row.id === first.data.id)).toMatchObject({ employee_id: 'e1', business_date: '2026-08-01', clock_in: input.startAt, clock_out: input.endAt, wage_snapshot: 1177, night_wage_snapshot: 1471, calc_status: 'CALCULATED' });
+    expect((await all<Record<string, unknown>>(dbName, 'logs')).filter((row) => row.kind === 'ATTENDANCE_CREATE')).toEqual([expect.objectContaining({ target_id: first.data.id, request_id: requestId })]);
+
+    const calendar = await controller.api.attendance.calendar('2026-08');
+    expect(calendar.ok && calendar.data.attendanceDates).toEqual(['2026-08-01']);
+    const day = await controller.api.attendance.day('2026-08-01');
+    expect(day.ok && day.data.shifts).toEqual([expect.objectContaining({ id: first.data.id })]);
+    const month = await controller.api.monthly.summary('2026-08');
+    expect(month.ok && month.data).toMatchObject({ attendanceCount: 1, openCount: 0, reviewCount: 0 });
+    expect(month.ok && month.data.totalYen).toBeGreaterThan(0);
+  });
+
+  it('rejects invalid, archived, overlong, and closed-month manual shifts without changing existing data', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'active', name: '在籍', hourly_wage: 1000, status: 'ACTIVE' } satisfies LocalEmployee);
+    await put(dbName, 'employees', { id: 'archived', name: '削除済み', hourly_wage: 1000, status: 'ARCHIVED' } satisfies LocalEmployee);
+    await put(dbName, 'shifts', { id: 'keep', employee_id: 'active', clock_in: at('2026-07-01T00:00:00Z'), clock_out: at('2026-07-01T01:00:00Z'), wage_snapshot: 1000 } satisfies LocalShift);
+    await put(dbName, 'periods', { month: '2026-09', status: 'CLOSED' } satisfies LocalPeriod);
+    const base = { employeeId: 'active', workDate: '2026-08-01', startAt: at('2026-08-01T00:00:00Z'), endAt: at('2026-08-01T01:00:00Z') };
+
+    expect((await controller.api.attendance.createShift(command({ ...base, workDate: '2026/08/01' }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ ...base, workDate: '2026-08-02' }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ ...base, endAt: base.startAt }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ ...base, endAt: base.startAt + 24 * 60 * 60 * 1000 }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ ...base, employeeId: 'missing' }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ ...base, employeeId: 'archived' }))).ok).toBe(false);
+    expect((await controller.api.attendance.createShift(command({ employeeId: 'active', workDate: '2026-09-01', startAt: at('2026-09-01T00:00:00Z'), endAt: at('2026-09-01T01:00:00Z') }))).ok).toBe(false);
+    expect(await all<LocalShift>(dbName, 'shifts')).toEqual([expect.objectContaining({ id: 'keep' })]);
+  });
+
   it('applies and reapplies corrections immediately, including corrected wage and effective month', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'e1', name: '山田', hourly_wage: 1000, status: 'ACTIVE' } satisfies LocalEmployee);

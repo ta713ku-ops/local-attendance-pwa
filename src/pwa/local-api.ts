@@ -1,7 +1,7 @@
 import type { Command, Result } from '../shared/api';
 import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { allocateEmployeeMonthPay, calculateShift, formatJstDate, formatJstMonth, getAttendanceStatus } from '../domain';
+import { allocateEmployeeMonthPay, calculateShift, formatJstDate, formatJstMonth, getAttendanceStatus, TWENTY_FOUR_HOURS_MS } from '../domain';
 import type {
   AttendanceDayDto, AttendanceShiftDto, BackupItemDto, BackupStatusDto, CorrectionDetailDto,
   CorrectionHistoryDto, CorrectionInput, EmployeeDto, MonthlyEmployeeDetailDto, MonthlyEmployeeDto,
@@ -223,6 +223,26 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
     attendance: {
       calendar: (month) => withRead(async () => { validateMonth(month); return { month, today: formatJstDate(now()), attendanceDates: [...new Set((await rows()).filter((x) => x.month === month).map((x) => x.workDate))].sort() }; }),
       day: (date) => withRead(async () => { validateDate(date); const all = await rows(); const effective = all.filter((x) => x.workDate === date); const selected = (await dtoRows()).filter((x) => x.workDate === date); const pay = exactPayTotal(effective); return { date, shifts: selected, totals: { ...pay, attendanceCount: selected.length, openCount: effective.filter((x) => x.state === 'OPEN').length, reviewCount: effective.filter((x) => x.state === 'NEEDS_REVIEW').length } }; }),
+      createShift: (input) => command('attendance:create-shift', input, async () => {
+        validateDate(input.workDate);
+        if (!Number.isSafeInteger(input.startAt) || !Number.isSafeInteger(input.endAt)) throw new Error('出勤・退勤時間を確認してください');
+        if (formatJstDate(input.startAt) !== input.workDate) throw new Error('勤務日と出勤時間の日付が一致しません');
+        if (input.endAt <= input.startAt) throw new Error('退勤は出勤より後にしてください');
+        if (input.endAt - input.startAt >= TWENTY_FOUR_HOURS_MS) throw new Error('勤務時間は24時間未満で入力してください');
+        const employee = await getOne<LocalEmployee>(db, 'employees', input.employeeId);
+        if (!employee || (employee.status ?? 'ACTIVE') !== 'ACTIVE') throw new Error('従業員が見つかりません');
+        if (await periodClosed(formatJstMonth(input.startAt))) throw new Error('月締め済みです');
+        const calculation = calculateShift({ clockIn: input.startAt, clockOut: input.endAt, hourlyWageYen: employee.hourly_wage, nightHourlyWageYen: employee.night_hourly_wage, approvedActualMinutes: false, approvedLongShiftReview: false });
+        const createdAt = now();
+        const shift: LocalShift = { id: uuid(), employee_id: employee.id, business_date: input.workDate, clock_in: input.startAt, clock_out: input.endAt, wage_snapshot: employee.hourly_wage, ...(employee.night_hourly_wage !== undefined ? { night_wage_snapshot: employee.night_hourly_wage } : {}), calc_status: calculation.status, created_at: createdAt };
+        const tx = db.transaction(['shifts', 'logs'], 'readwrite');
+        tx.objectStore('shifts').put(shift);
+        tx.objectStore('logs').put({ id: uuid(), created_at: createdAt, kind: 'ATTENDANCE_CREATE', target_id: shift.id, request_id: input.requestId, result: 'SUCCESS' } satisfies LocalLog);
+        await transactionDone(tx);
+        const created = (await dtoRows()).find((row) => row.id === shift.id);
+        if (!created) throw new Error('追加した勤務を確認できませんでした');
+        return created;
+      }),
       correctionEmployees: () => withRead(async () => (await getAll<LocalEmployee>(db, 'employees')).map(employeeDto).sort((a, b) => a.name.localeCompare(b.name, 'ja'))),
       correctionShifts: (employeeId) => withRead(async () => { const all = (await rows()).filter((x) => x.shift.employee_id === employeeId); return all.sort((a, b) => b.clockIn - a.clockIn).map((x) => ({ shiftId: x.shift.id, employeeId, employeeName: x.employee?.name ?? '削除済み', workDate: x.workDate, effectiveClockIn: x.clockIn, effectiveClockOut: x.clockOut, state: x.state, corrected: Boolean(x.correction), legacyPending: Boolean(x.pending) })); }),
       correctionDetail: (shiftId) => withRead(() => correctionDetail(shiftId)),
