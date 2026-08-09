@@ -28,7 +28,7 @@ const registerServiceWorker = async () => {
     const baseUrl = new URL(import.meta.env.BASE_URL, window.location.origin);
     const registration = await navigator.serviceWorker.register(
       new URL('sw.js', baseUrl),
-      { scope: baseUrl.pathname },
+      { scope: baseUrl.pathname, updateViaCache: 'none' },
     );
     announceUpdate(registration);
     registration.addEventListener('updatefound', () => {
@@ -38,6 +38,11 @@ const registerServiceWorker = async () => {
         if (worker.state === 'installed' && navigator.serviceWorker.controller) announceUpdate(registration);
       });
     });
+    if (navigator.onLine) void registration.update().catch(() => undefined);
+    const checkForUpdate = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) void registration.update().catch(() => undefined);
+    };
+    document.addEventListener('visibilitychange', checkForUpdate);
   } catch (error) {
     // The app is still usable online; do not interrupt a time-clock operation.
     console.warn('オフライン機能を準備できませんでした。', error);

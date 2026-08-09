@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#072C2C" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; connect-src 'self'; form-action 'self'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'self'" />
+    <link rel="stylesheet" href="./update.css" />
+    <title>勤怠アプリを更新</title>
+  </head>
+  <body>
+    <main class="update-page">
+      <p class="eyebrow">勤怠アプリ</p>
+      <h1>最新版へ更新しています</h1>
+      <section class="update-card" role="status" aria-live="polite">
+        <strong id="update-status">更新を確認しています…</strong>
+        <p>従業員情報や勤怠データは削除されません。</p>
+      </section>
+      <button id="retry" type="button" hidden>もう一度更新する</button>
+    </main>
+    <script src="./update.js" defer></script>
+  </body>
+</html>
