@@ -9,6 +9,8 @@ export interface EmployeeDto {
   id: string;
   name: string;
   hourlyWage: number;
+  /** Null means a legacy employee still using the historical 25% night premium. */
+  nightHourlyWage: number | null;
   status: EmployeeStatus;
   archivedAt: number | null;
   restoreUntil: number | null;
@@ -91,6 +93,7 @@ export interface CorrectionHistoryDto {
   startAt: number;
   endAt: number;
   hourlyWage: number;
+  nightHourlyWage: number | null;
   reason: string;
   calculationMethod: CalculationMethod;
   longShiftConfirmed: boolean;
@@ -106,9 +109,11 @@ export interface CorrectionDetailDto {
   originalClockIn: number;
   originalClockOut: number | null;
   originalHourlyWage: number;
+  originalNightHourlyWage: number | null;
   effectiveClockIn: number;
   effectiveClockOut: number | null;
   effectiveHourlyWage: number;
+  effectiveNightHourlyWage: number | null;
   calculationMethod: CalculationMethod;
   longShiftConfirmed: boolean;
   currentPay: PayBreakdownDto | null;
@@ -120,6 +125,8 @@ export interface CorrectionInput {
   startAt: number;
   endAt: number;
   hourlyWage: number;
+  /** Omitted only when preserving a legacy shift's historical 25% premium. */
+  nightHourlyWage?: number;
   reason?: string;
   calculationMethod: CalculationMethod;
   longShiftConfirmed: boolean;
@@ -194,8 +201,8 @@ export interface PwaAttendanceApi {
   };
   employees: {
     list(includeArchived?: boolean): Promise<Result<EmployeeDto[]>>;
-    create(input: Command<{ name: string; hourlyWage: number }>): Promise<Result<EmployeeDto>>;
-    update(input: Command<{ id: string; name?: string; hourlyWage?: number }>): Promise<Result<{ id: string }>>;
+    create(input: Command<{ name: string; hourlyWage: number; nightHourlyWage?: number }>): Promise<Result<EmployeeDto>>;
+    update(input: Command<{ id: string; name?: string; hourlyWage?: number; nightHourlyWage?: number }>): Promise<Result<{ id: string }>>;
     archive(input: Command<{ id: string }>): Promise<Result<{ id: string; status: 'ARCHIVED' }>>;
     restore(input: Command<{ id: string }>): Promise<Result<{ id: string; status: 'ACTIVE' }>>;
     permanentlyDelete(input: Command<{ id: string }>): Promise<Result<never>>;

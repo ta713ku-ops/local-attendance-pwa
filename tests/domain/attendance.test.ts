@@ -49,6 +49,24 @@ describe('calculation and night work', () => {
     expect(result).toMatchObject({ regularMinutes: 60, nightMinutes: 420, regularPay240thYen: 240240, nightPay240thYen: 2102100, pay240thYen: 2342340 });
   });
 
+  it('keeps a 1177 yen half-hour exact and accepts an independent 1471 yen night rate', () => {
+    const regular = calculateShift({ clockIn: '2024-01-01T09:00:00+09:00', clockOut: '2024-01-01T09:30:00+09:00', hourlyWageYen: 1177, nightHourlyWageYen: 1471 });
+    expect(regular).toMatchObject({ regularMinutes: 30, nightMinutes: 0, regularPay240thYen: 141240, pay240thYen: 141240 });
+    expect(regular.pay240thYen / 240).toBe(588.5);
+
+    const boundary = calculateShift({ clockIn: '2024-01-01T21:30:00+09:00', clockOut: '2024-01-01T22:30:00+09:00', hourlyWageYen: 1177, nightHourlyWageYen: 1471 });
+    expect(boundary).toMatchObject({ regularMinutes: 30, nightMinutes: 30, regularPay240thYen: 141240, nightPay240thYen: 176520, pay240thYen: 317760 });
+    expect(boundary.regularPay240thYen / 240).toBe(588.5);
+    expect(boundary.nightPay240thYen / 240).toBe(735.5);
+    expect(boundary.pay240thYen / 240).toBe(1324);
+  });
+
+  it('keeps the historical 25 percent night premium when no independent night rate exists', () => {
+    const legacy = calculateShift({ clockIn: '2024-01-01T21:30:00+09:00', clockOut: '2024-01-01T22:30:00+09:00', hourlyWageYen: 1177 });
+    expect(legacy).toMatchObject({ regularPay240thYen: 141240, nightPay240thYen: 176550, pay240thYen: 317790 });
+    expect(legacy.nightPay240thYen / 240).toBe(735.625);
+  });
+
   it('requires review from the source timestamps when a 24-hour-plus shift rounds below 24 hours', () => {
     const exactly24Hours = calculateShift({ clockIn: '2024-02-28T00:01:00+09:00', clockOut: '2024-02-29T00:01:00+09:00', hourlyWageYen: 1000 });
     expect(exactly24Hours.status).toBe('CALCULATED');
@@ -118,6 +136,13 @@ describe('clock state machine', () => {
     const reentry = { shifts: [{ clockIn: '2024-01-01T08:00:00+09:00', clockOut: '2024-01-01T12:00:00+09:00' }], now: '2024-01-01T13:00:00+09:00' };
     expect(decideClockAction(reentry, 'CLOCK_IN').decision).toBe('CONFIRM_REENTRY');
     expect(decideClockAction(reentry, 'CLOCK_IN', true).decision).toBe('ALLOW');
+  });
+
+  it('returns to ready after a completed shift belongs to the previous JST day', () => {
+    expect(getAttendanceStatus({
+      shifts: [{ clockIn: '2024-01-01T08:00:00+09:00', clockOut: '2024-01-01T12:00:00+09:00' }],
+      now: '2024-01-02T00:00:00+09:00',
+    })).toBe('READY_TO_CLOCK_IN');
   });
 
   it('rejects archived employees and closed months before any clock action', () => {

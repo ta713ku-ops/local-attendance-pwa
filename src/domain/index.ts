@@ -15,7 +15,13 @@ export type ReviewReason = 'NON_POSITIVE_ROUNDED_DURATION' | 'OVER_24_HOURS';
 export interface ShiftCalculationInput {
   clockIn: Instant;
   clockOut: Instant;
+  /** Regular-work hourly wage in whole yen. */
   hourlyWageYen: number;
+  /**
+   * Explicit night-work hourly wage in whole yen.  Legacy records omit this
+   * value and retain the historical 25% premium calculation.
+   */
+  nightHourlyWageYen?: number;
   /** Approved short-shift exception: calculate using the effective minute timestamps. */
   approvedActualMinutes?: boolean;
   /** Explicit management confirmation required before a shift over 24 hours can calculate. */
@@ -96,6 +102,9 @@ export function calculateShift(input: ShiftCalculationInput): CalculatedShift {
   if (!Number.isInteger(input.hourlyWageYen) || input.hourlyWageYen < 0) {
     throw new RangeError('hourlyWageYen must be a non-negative integer');
   }
+  if (input.nightHourlyWageYen !== undefined && (!Number.isInteger(input.nightHourlyWageYen) || input.nightHourlyWageYen < 0)) {
+    throw new RangeError('nightHourlyWageYen must be a non-negative integer');
+  }
   const clockInMs = toEpochMs(input.clockIn);
   const clockOutMs = toEpochMs(input.clockOut);
   const roundedClockInMs = roundClockInUp(clockInMs);
@@ -118,11 +127,13 @@ export function calculateShift(input: ShiftCalculationInput): CalculatedShift {
   }
   const totalMinutes = minutesBetween(startMs, endMs);
   const nightMinutes = calculateNightMinutes(startMs, endMs);
-  // base pay: minutes * wage / 60; premium: night minutes * wage * .25 / 60.
-  // Multiplication by 240 removes both denominators exactly.
+  // Multiplication by 240 keeps both the historical 25% premium and explicit
+  // whole-yen night rates exact without floating-point rounding.
   const regularMinutes = totalMinutes - nightMinutes;
   const regularPay240thYen = regularMinutes * input.hourlyWageYen * 4;
-  const nightPay240thYen = nightMinutes * input.hourlyWageYen * 5;
+  const nightPay240thYen = input.nightHourlyWageYen === undefined
+    ? nightMinutes * input.hourlyWageYen * 5
+    : nightMinutes * input.nightHourlyWageYen * 4;
   const pay240thYen = regularPay240thYen + nightPay240thYen;
   return { ...base, status: 'CALCULATED', totalMinutes, nightMinutes, regularMinutes, pay240thYen, regularPay240thYen, nightPay240thYen };
 }

@@ -10,6 +10,7 @@ const pwaApi = () => window.attendance as unknown as PwaAttendanceApi;
 const requestId = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const unwrap = async <T,>(promise: Promise<{ ok: true; data: T } | { ok: false; message: string }>) => { const result = await promise; if (!result.ok) throw new Error(result.message); return result.data; };
 const clockTime = (value?: number) => value ? new Date(value).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '—';
+const jstDateKey = (value: Date) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(value);
 
 export default function App() {
   const [view, setView] = useState<View>('clock');
@@ -27,8 +28,28 @@ export default function App() {
   const [updating, setUpdating] = useState(false);
   const updateRequested = useRef(false);
   const reloading = useRef(false);
+  const loadedHomeDate = useRef(jstDateKey(now));
   const loadHome = async () => { setLoading(true); setError(''); try { const data = await unwrap(pwaApi().clock.home()); setEmployees(data.employees); setConfigured(data.adminConfigured); } catch (cause) { setError(cause instanceof Error ? cause.message : '打刻画面を読み込めませんでした。'); } finally { setLoading(false); } };
   useEffect(() => { void loadHome(); const timer = window.setInterval(() => setNow(new Date()), 1000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    const currentDate = jstDateKey(now);
+    if (view !== 'clock' || loadedHomeDate.current === currentDate) return;
+    loadedHomeDate.current = currentDate;
+    void loadHome();
+  }, [now, view]);
+  useEffect(() => {
+    const reloadWhenVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const current = new Date();
+      setNow(current);
+      if (view === 'clock') {
+        loadedHomeDate.current = jstDateKey(current);
+        void loadHome();
+      }
+    };
+    document.addEventListener('visibilitychange', reloadWhenVisible);
+    return () => document.removeEventListener('visibilitychange', reloadWhenVisible);
+  }, [view]);
   useEffect(() => {
     const onUpdateReady = (event: Event) => {
       setUpdateRegistration((event as CustomEvent<ServiceWorkerRegistration>).detail);
@@ -88,7 +109,7 @@ export default function App() {
   </main>;
 }
 
-function ClockHome({ now, employees, search, loading, onSearch, onChoose, onAdmin, retry }: { now: Date; employees: HomeEmployee[]; search: string; loading: boolean; onSearch: (value: string) => void; onChoose: (employee: HomeEmployee) => void; onAdmin: () => void; retry: () => Promise<void> }) { return <section className="clock-page"><header className="clock-head"><h1>打刻</h1><p className="today">{now.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}</p><output className="clock-time">{clockTime(now.getTime())}</output></header><div className="clock-body"><h2>お名前を選んでください</h2><label className="search"><span className="sr-only">氏名を検索</span><input value={search} onChange={event => onSearch(event.target.value)} placeholder="氏名を検索" /></label>{loading ? <Loading /> : employees.length ? <div className="employee-grid">{employees.map(employee => <button className="employee-card" key={employee.id} onClick={() => onChoose(employee)}><span>{employee.name}</span><small>{employee.status === 'WORKING' ? '勤務中' : employee.status === 'CLOCKED_OUT_TODAY' ? '本日退勤済み' : 'タップして打刻'}</small></button>)}</div> : <Empty title="表示できる従業員がいません" action={() => void retry()} />}</div><footer className="clock-footer"><button className="link-button" onClick={onAdmin}>管理者メニュー</button></footer></section>; }
+function ClockHome({ now, employees, search, loading, onSearch, onChoose, onAdmin, retry }: { now: Date; employees: HomeEmployee[]; search: string; loading: boolean; onSearch: (value: string) => void; onChoose: (employee: HomeEmployee) => void; onAdmin: () => void; retry: () => Promise<void> }) { return <section className="clock-page"><header className="clock-head"><h1>打刻</h1><p className="today">{now.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}</p><output className="clock-time">{clockTime(now.getTime())}</output></header><div className="clock-body"><h2>お名前を選んでください</h2><label className="search"><span className="sr-only">氏名を検索</span><input value={search} onChange={event => onSearch(event.target.value)} placeholder="氏名を検索" /></label>{loading ? <Loading /> : employees.length ? <div className="employee-grid">{employees.map(employee => <button className={`employee-card${employee.status === 'WORKING' ? ' employee-card--working' : employee.status === 'CLOCKED_OUT_TODAY' ? ' employee-card--clocked-out' : ''}`} key={employee.id} onClick={() => onChoose(employee)}><span>{employee.name}</span><small>{employee.status === 'WORKING' ? '勤務中' : employee.status === 'CLOCKED_OUT_TODAY' ? '本日退勤済み' : 'タップして打刻'}</small></button>)}</div> : <Empty title="表示できる従業員がいません" action={() => void retry()} />}</div><footer className="clock-footer"><button className="link-button" onClick={onAdmin}>管理者メニュー</button></footer></section>; }
 function Flow({ title, back, children }: { title: string; back: () => void; children: React.ReactNode }) { return <section className="flow"><button className="back" onClick={back}>‹ 打刻へ戻る</button><h1>{title}</h1>{children}<small className="return">30秒操作がない場合は打刻ホームへ戻ります。</small></section>; }
 function AdminAuth({ configured, back, open, recover, onRecovery }: { configured: boolean; back: () => void; open: () => void; recover: () => void; onRecovery: (code: string) => void }) { const [pin, setPin] = useState(''); const [confirmation, setConfirmation] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const submit = async (event: FormEvent) => { event.preventDefault(); if (pin.length !== 6 || (!configured && pin !== confirmation)) return setError('6桁のPINを正しく入力してください。'); setBusy(true); try { if (configured) await unwrap(pwaApi().adminAuth.verify({ pin, requestId: requestId() })); else { const result = await unwrap(pwaApi().adminAuth.setup({ pin, requestId: requestId() })); onRecovery(result.recoveryCode); return; } open(); } catch (cause) { setError(cause instanceof Error ? cause.message : '認証できませんでした。'); } finally { setBusy(false); } }; return <Flow title={configured ? '管理者PINを入力' : '管理者PINを設定'} back={back}><form className="stack-form" onSubmit={submit}><PinField label="PIN（6桁）" value={pin} setValue={setPin} />{!configured && <PinField label="PIN（確認）" value={confirmation} setValue={setConfirmation} />}{error && <p className="form-error" role="alert">{error}</p>}<button className="primary action-button" disabled={busy}>{busy ? '確認しています…' : '認証する'}</button>{configured && <button type="button" className="link-button" onClick={recover}>PINを忘れた場合</button>}</form></Flow>; }
 function Recovery({ back, onRecovery }: { back: () => void; onRecovery: (code: string) => void }) { const [code, setCode] = useState(''); const [pin, setPin] = useState(''); const [confirmation, setConfirmation] = useState(''); const [error, setError] = useState(''); const submit = async (event: FormEvent) => { event.preventDefault(); if (pin.length !== 6 || pin !== confirmation) return setError('新しいPINを6桁で一致させてください。'); try { const result = await unwrap(pwaApi().adminAuth.resetWithRecovery({ recoveryCode: code.trim(), newPin: pin, requestId: requestId() })); onRecovery(result.recoveryCode); } catch (cause) { setError(cause instanceof Error ? cause.message : '再設定できませんでした。'); } }; return <Flow title="管理者PINを再設定" back={back}><form className="stack-form" onSubmit={submit}><label>回復コード<input type="password" value={code} onChange={event => setCode(event.target.value)} /></label><PinField label="新しいPIN" value={pin} setValue={setPin} /><PinField label="新しいPIN（確認）" value={confirmation} setValue={setConfirmation} />{error && <p className="form-error">{error}</p>}<button className="primary action-button">PINを再設定する</button></form></Flow>; }

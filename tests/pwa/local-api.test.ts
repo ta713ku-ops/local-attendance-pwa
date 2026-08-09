@@ -116,21 +116,40 @@ describe('PWA local API', () => {
     expect(after.ok && after.data).toHaveLength(1);
   });
 
+  it('stores independent wages for new employees and clock snapshots without changing legacy employees', async () => {
+    const { dbName, controller } = await setup(at('2026-08-01T12:30:00Z'));
+    await put(dbName, 'employees', { id: 'legacy', name: '既存', hourly_wage: 1200 } satisfies LocalEmployee);
+    const created = await controller.api.employees.create(command({ name: '新規', hourlyWage: 1177, nightHourlyWage: 1471 }));
+    expect(created.ok && created.data).toMatchObject({ hourlyWage: 1177, nightHourlyWage: 1471 });
+    if (!created.ok) return;
+    expect((await controller.api.clock.clockIn(command({ employeeId: created.data.id }))).ok).toBe(true);
+    const storedEmployees = await all<LocalEmployee>(dbName, 'employees');
+    expect(storedEmployees.find((row) => row.id === 'legacy')).toEqual({ id: 'legacy', name: '既存', hourly_wage: 1200 });
+    expect(storedEmployees.find((row) => row.id === created.data.id)).toMatchObject({ hourly_wage: 1177, night_hourly_wage: 1471 });
+    expect((await all<LocalShift>(dbName, 'shifts'))[0]).toMatchObject({ wage_snapshot: 1177, night_wage_snapshot: 1471 });
+    expect((await controller.api.employees.update(command({ id: created.data.id, hourlyWage: 1200, nightHourlyWage: 1500 }))).ok).toBe(true);
+    expect((await all<LocalEmployee>(dbName, 'employees')).find((row) => row.id === created.data.id)).toMatchObject({ hourly_wage: 1200, night_hourly_wage: 1500 });
+    expect((await all<LocalShift>(dbName, 'shifts'))[0]).toMatchObject({ wage_snapshot: 1177, night_wage_snapshot: 1471 });
+    const listed = await controller.api.employees.list(true);
+    expect(listed.ok && listed.data.find((row) => row.id === 'legacy')?.nightHourlyWage).toBeNull();
+  });
+
   it('applies and reapplies corrections immediately, including corrected wage and effective month', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'e1', name: '山田', hourly_wage: 1000, status: 'ACTIVE' } satisfies LocalEmployee);
     await put(dbName, 'shifts', { id: 's1', employee_id: 'e1', clock_in: at('2026-07-31T14:00:00Z'), clock_out: at('2026-07-31T18:00:00Z'), wage_snapshot: 1000 } satisfies LocalShift);
-    const first = await controller.api.attendance.applyCorrection(command({ shiftId: 's1', startAt: at('2026-08-01T00:00:00Z'), endAt: at('2026-08-01T03:00:00Z'), hourlyWage: 1400, calculationMethod: 'HALF_HOUR', longShiftConfirmed: false }));
-    expect(first.ok && first.data).toMatchObject({ effectiveHourlyWage: 1400, effectiveClockIn: at('2026-08-01T00:00:00Z') });
+    const first = await controller.api.attendance.applyCorrection(command({ shiftId: 's1', startAt: at('2026-08-01T00:00:00Z'), endAt: at('2026-08-01T03:00:00Z'), hourlyWage: 1400, nightHourlyWage: 1750, calculationMethod: 'HALF_HOUR', longShiftConfirmed: false }));
+    expect(first.ok && first.data).toMatchObject({ effectiveHourlyWage: 1400, effectiveNightHourlyWage: 1750, effectiveClockIn: at('2026-08-01T00:00:00Z') });
     const second = await controller.api.attendance.applyCorrection(command({ shiftId: 's1', startAt: at('2026-08-02T00:00:00Z'), endAt: at('2026-08-02T02:00:00Z'), hourlyWage: 1500, calculationMethod: 'ACTUAL_MINUTES', longShiftConfirmed: false }));
     expect(second.ok && second.data.history).toHaveLength(2);
+    expect(second.ok && second.data.effectiveNightHourlyWage).toBe(1750);
     const july = await controller.api.monthly.summary('2026-07');
     const august = await controller.api.monthly.summary('2026-08');
     expect(july.ok && july.data.attendanceCount).toBe(0);
     expect(august.ok && august.data.attendanceCount).toBe(1);
   });
 
-  it('previews the same allocated amount as save when other employee-month shifts exist', async () => {
+  it('previews the same exact amount as save when other employee-month shifts exist', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'e1', name: '山田', hourly_wage: 55 } satisfies LocalEmployee);
     await put(dbName, 'shifts', { id: 's1', employee_id: 'e1', clock_in: at('2026-08-01T00:00:00Z'), clock_out: at('2026-08-01T00:01:00Z'), wage_snapshot: 33 } satisfies LocalShift);
@@ -138,7 +157,7 @@ describe('PWA local API', () => {
     await put(dbName, 'corrections', { id: 'c2', shift_id: 's2', start_at: at('2026-08-02T00:00:00Z'), end_at: at('2026-08-02T00:01:00Z'), hourly_wage: 55, calculation_method: 'ACTUAL_MINUTES', status: 'APPROVED', created_at: 1 } satisfies LocalCorrection);
     const input = { shiftId: 's1', startAt: at('2026-08-01T00:00:00Z'), endAt: at('2026-08-01T00:01:00Z'), hourlyWage: 33, calculationMethod: 'ACTUAL_MINUTES' as const, longShiftConfirmed: false };
     const preview = await controller.api.attendance.previewCorrection(input);
-    expect(preview.ok && preview.data.after.pay?.totalYen).toBe(0);
+    expect(preview.ok && preview.data.after.pay?.totalYen).toBe(0.55);
     const saved = await controller.api.attendance.applyCorrection(command(input));
     expect(saved.ok && saved.data.currentPay).toEqual(preview.ok ? preview.data.after.pay : null);
   });
@@ -359,6 +378,47 @@ describe('PWA local API', () => {
     const status = await controller.api.backup.status();
     expect(status.ok && status.data.lastFailureAt).not.toBeNull();
     expect(status.ok && status.data.lastFailure).toContain('storage quota exceeded');
+  });
+
+  it('returns exact shift and day decimals while keeping employee-month half-up totals', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'e1', name: '山田', hourly_wage: 1177, night_hourly_wage: 1471 } satisfies LocalEmployee);
+    await put(dbName, 'shifts', { id: 's1', employee_id: 'e1', clock_in: at('2026-08-01T00:00:00Z'), clock_out: at('2026-08-01T00:30:00Z'), wage_snapshot: 1177, night_wage_snapshot: 1471 } satisfies LocalShift);
+
+    const day = await controller.api.attendance.day('2026-08-01');
+    expect(day.ok && day.data.shifts[0].pay).toMatchObject({ regularYen: 588.5, nightYen: 0, totalYen: 588.5 });
+    expect(day.ok && day.data.totals.totalYen).toBe(588.5);
+
+    const employee = await controller.api.monthly.employeeDetail('2026-08', 'e1');
+    expect(employee.ok && employee.data.days[0].totals.totalYen).toBe(588.5);
+    expect(employee.ok && employee.data.totals.totalYen).toBe(589);
+    const month = await controller.api.monthly.summary('2026-08');
+    expect(month.ok && month.data).toMatchObject({ regularYen: 589, nightYen: 0, totalYen: 589 });
+
+    const csv = await controller.api.monthly.exportCsv('2026-08');
+    expect(csv.ok).toBe(true);
+    if (csv.ok) {
+      const lines = csv.data.csv.replace(/^\uFEFF/, '').split('\r\n');
+      expect(lines.find((line) => line.startsWith('"明細"'))).toContain('"588.5"');
+      expect(lines.find((line) => line.startsWith('"従業員合計"'))).toContain('"589"');
+      expect(lines.find((line) => line.startsWith('"月全体合計"'))).toContain('"589"');
+    }
+  });
+
+  it('uses an independent night snapshot and preserves the legacy 25 percent fallback', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'explicit', name: '新方式', hourly_wage: 1177, night_hourly_wage: 1471 } satisfies LocalEmployee);
+    await put(dbName, 'employees', { id: 'legacy', name: '旧方式', hourly_wage: 1177 } satisfies LocalEmployee);
+    const clockIn = at('2026-08-01T12:30:00Z');
+    const clockOut = at('2026-08-01T13:30:00Z');
+    await put(dbName, 'shifts', { id: 'explicit-shift', employee_id: 'explicit', clock_in: clockIn, clock_out: clockOut, wage_snapshot: 1177, night_wage_snapshot: 1471 } satisfies LocalShift);
+    await put(dbName, 'shifts', { id: 'legacy-shift', employee_id: 'legacy', clock_in: clockIn, clock_out: clockOut, wage_snapshot: 1177 } satisfies LocalShift);
+    const day = await controller.api.attendance.day('2026-08-01');
+    expect(day.ok).toBe(true);
+    if (day.ok) {
+      expect(day.data.shifts.find((row) => row.id === 'explicit-shift')?.pay).toMatchObject({ regularYen: 588.5, nightYen: 735.5, totalYen: 1324 });
+      expect(day.data.shifts.find((row) => row.id === 'legacy-shift')?.pay).toMatchObject({ regularYen: 588.5, nightYen: 735.625, totalYen: 1324.125 });
+    }
   });
 
   it('returns BOM CSV with detail, employee total, month total and disclaimer', async () => {
