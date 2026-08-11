@@ -3,7 +3,7 @@ import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { allocateEmployeeMonthPay, calculateShift, formatJstDate, formatJstMonth, getAttendanceStatus, TWENTY_FOUR_HOURS_MS } from '../domain';
 import type {
-  AttendanceDayDto, AttendanceShiftDto, BackupItemDto, BackupStatusDto, CorrectionDetailDto,
+  AnnualEmployeeDetailDto, AnnualEmployeeDto, AnnualMonthDto, AnnualSummaryDto, AttendanceDayDto, AttendanceShiftDto, BackupItemDto, BackupStatusDto, CorrectionDetailDto,
   CorrectionHistoryDto, CorrectionInput, EmployeeDto, MonthlyEmployeeDetailDto, MonthlyEmployeeDto,
   MonthlySummaryDto, PayBreakdownDto, PwaAttendanceApi,
 } from './pwa-api.types';
@@ -37,6 +37,7 @@ const uuid = () => {
 };
 const jstDayNumber = (at: number) => Math.floor((at + 9 * 60 * 60 * 1000) / 86_400_000);
 const validateMonth = (value: string) => { if (!/^\d{4}-\d{2}$/.test(value)) throw new Error('対象月を確認してください'); };
+const validateYear = (value: string) => { if (!/^\d{4}$/.test(value)) throw new Error('対象年を確認してください'); };
 const validateDate = (value: string) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('対象日を確認してください'); };
 const validatePin = (pin: string) => { if (!/^\d{6}$/.test(pin)) throw new Error('PINは6桁の数字です'); };
 const csvCell = (value: unknown) => { let text = value == null ? '' : String(value); if (/^[=+\-@]/.test(text)) text = `'${text}`; return `"${text.replace(/"/g, '""')}"`; };
@@ -190,6 +191,17 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
   const dtoRows = async () => { const all = await rows(); const occurrence = new Map<string, number>(); return all.sort((a, b) => a.clockIn - b.clockIn || a.shift.id.localeCompare(b.shift.id)).map((row): AttendanceShiftDto => { const key = `${row.shift.employee_id}|${row.workDate}`; const count = (occurrence.get(key) ?? 0) + 1; occurrence.set(key, count); return { id: row.shift.id, employeeId: row.shift.employee_id, employeeName: row.employee?.name ?? '削除済み', workDate: row.workDate, effectiveClockIn: row.clockIn, effectiveClockOut: row.clockOut, state: row.state, occurrenceOfDay: count, pay: exactPay(row) }; }); };
   const correctionDetail = async (shiftId: string): Promise<CorrectionDetailDto> => { const all = await rows(); const row = all.find((x) => x.shift.id === shiftId); if (!row) throw new Error('勤務が見つかりません'); const dto = (await dtoRows()).find((x) => x.id === shiftId)!; const history = (await getAll<LocalCorrection>(db, 'corrections')).filter((x) => x.shift_id === shiftId).sort((a, b) => b.created_at - a.created_at).map((x): CorrectionHistoryDto => ({ id: x.id, startAt: x.start_at, endAt: x.end_at, hourlyWage: x.hourly_wage ?? row.shift.wage_snapshot, nightHourlyWage: x.night_hourly_wage ?? row.shift.night_wage_snapshot ?? null, reason: x.reason ?? '', calculationMethod: x.calculation_method ?? 'HALF_HOUR', longShiftConfirmed: x.long_shift_confirmed ?? false, status: x.status, appliedAt: x.applied_at ?? x.decided_at ?? null, createdAt: x.created_at })); return { shiftId, employeeId: row.shift.employee_id, employeeName: row.employee?.name ?? '削除済み', originalClockIn: row.shift.clock_in, originalClockOut: row.shift.clock_out ?? null, originalHourlyWage: row.shift.wage_snapshot, originalNightHourlyWage: row.shift.night_wage_snapshot ?? null, effectiveClockIn: row.clockIn, effectiveClockOut: row.clockOut, effectiveHourlyWage: row.wage, effectiveNightHourlyWage: row.nightWage ?? null, calculationMethod: row.method, longShiftConfirmed: row.longConfirmed, currentPay: dto.pay, history }; };
   const summary = async (month: string): Promise<MonthlySummaryDto> => { validateMonth(month); const all = await rows(); const selected = all.filter((x) => x.month === month); const allocated = allocateMonthlyPay(all); const employeeIds = [...new Set(selected.map((x) => x.shift.employee_id))]; const employees: MonthlyEmployeeDto[] = employeeIds.map((employeeId) => { const subset = selected.filter((x) => x.shift.employee_id === employeeId); const pay = subset.map((x) => allocated.get(x.shift.id)).filter((x): x is PayBreakdownDto => Boolean(x)).reduce(addPay, zeroPay()); return { employeeId, employeeName: subset[0].employee?.name ?? '削除済み', attendanceCount: subset.length, ...pay }; }).sort((a, b) => b.totalYen - a.totalYen || a.employeeName.localeCompare(b.employeeName, 'ja')); const totals = employees.reduce<PayBreakdownDto>((acc, x) => addPay(acc, x), zeroPay()); const openCount = selected.filter((x) => x.state === 'OPEN').length; const reviewCount = selected.filter((x) => x.state === 'NEEDS_REVIEW').length; const legacyPendingCount = selected.filter((x) => x.pending).length; const status = (await periodClosed(month)) ? 'CLOSED' : 'OPEN'; return { month, status, employees, attendanceCount: selected.length, openCount, reviewCount, legacyPendingCount, canClose: selected.length > 0 && status === 'OPEN' && openCount + reviewCount + legacyPendingCount === 0, ...totals }; };
+  const annualMonths = async (year: string) => { validateYear(year); return Promise.all(Array.from({ length: 12 }, (_, index) => summary(`${year}-${String(index + 1).padStart(2, '0')}`))); };
+  const annualSummary = async (year: string): Promise<AnnualSummaryDto> => {
+    const months = await annualMonths(year);
+    const employeeIds = [...new Set(months.flatMap((month) => month.employees.map((employee) => employee.employeeId)))];
+    const employees: AnnualEmployeeDto[] = employeeIds.map((employeeId) => {
+      const values = months.flatMap((month) => month.employees.filter((employee) => employee.employeeId === employeeId));
+      const pay = values.reduce<PayBreakdownDto>((acc, value) => addPay(acc, value), zeroPay());
+      return { employeeId, employeeName: values[0].employeeName, attendanceCount: values.reduce((sum, value) => sum + value.attendanceCount, 0), ...pay };
+    }).sort((a, b) => b.totalYen - a.totalYen || a.employeeName.localeCompare(b.employeeName, 'ja'));
+    return { year, employees, attendanceCount: employees.reduce((sum, employee) => sum + employee.attendanceCount, 0), ...employees.reduce<PayBreakdownDto>((acc, employee) => addPay(acc, employee), zeroPay()) };
+  };
 
   const exportPayload = async (): Promise<LocalBackupPayload> => { const stores = {} as Record<SnapshotStoreName, unknown[]>; for (const store of SNAPSHOT_STORES) stores[store] = await getAll(db, store); return { format: 'local-attendance-pwa-backup', version: 2, exportedAt: now(), stores }; };
   const pruneBackups = async () => { const cutoff = jstDayNumber(now()) - 90; const old = (await getAll<LocalBackup>(db, 'backups')).filter((x) => jstDayNumber(x.created_at) < cutoff); if (!old.length) return; const tx = db.transaction('backups', 'readwrite'); for (const item of old) tx.objectStore('backups').delete(item.id); await transactionDone(tx); };
@@ -258,6 +270,20 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
       reopen: (input) => command('monthly:reopen', input, async () => { if (!(await periodClosed(input.month))) throw new Error('月は確定されていません'); await putOne(db, 'periods', { month: input.month, status: 'OPEN', closed_at: null, reopened_at: now() } satisfies LocalPeriod); await log('MONTH_REOPEN', input.month, input.requestId); return summary(input.month); }),
       exportCsv: (month) => withRead(async () => { const monthSummary = await summary(month); const dtos = await dtoRows(); const all = await rows(); const header = ['行種別', '氏名', '勤務日', '実効出勤', '実効退勤', '通常時間', '深夜時間', '通常金額', '深夜金額', '合計金額', '状態']; const lines: string[] = [header.map(csvCell).join(',')]; for (const row of all.filter((x) => x.month === month).sort((a, b) => a.clockIn - b.clockIn || a.shift.id.localeCompare(b.shift.id))) { const dto = dtos.find((x) => x.id === row.shift.id)!; lines.push(['明細', dto.employeeName, dto.workDate, new Date(dto.effectiveClockIn).toISOString(), dto.effectiveClockOut == null ? '' : new Date(dto.effectiveClockOut).toISOString(), dto.pay?.regularMinutes ?? '', dto.pay?.nightMinutes ?? '', dto.pay?.regularYen ?? '', dto.pay?.nightYen ?? '', dto.pay?.totalYen ?? '', dto.state].map(csvCell).join(',')); } for (const employee of monthSummary.employees) lines.push(['従業員合計', employee.employeeName, '', '', '', employee.regularMinutes, employee.nightMinutes, employee.regularYen, employee.nightYen, employee.totalYen, ''].map(csvCell).join(',')); lines.push(['月全体合計', '', month, '', '', monthSummary.regularMinutes, monthSummary.nightMinutes, monthSummary.regularYen, monthSummary.nightYen, monthSummary.totalYen, monthSummary.status].map(csvCell).join(',')); lines.push([csvCell('※残業・休日割増は含まれていません')].join(',')); return { fileName: `給与見込み-${month}.csv`, mimeType: 'text/csv;charset=utf-8', csv: `\uFEFF${lines.join('\r\n')}` }; }),
       print: (month) => withRead(() => summary(month)),
+    },
+    annual: {
+      summary: (year) => withRead(() => annualSummary(year)),
+      employeeDetail: (year, employeeId) => withRead(async (): Promise<AnnualEmployeeDetailDto> => {
+        const [annual, months, employee] = await Promise.all([annualSummary(year), annualMonths(year), getOne<LocalEmployee>(db, 'employees', employeeId)]);
+        const totals = annual.employees.find((value) => value.employeeId === employeeId);
+        if (!employee || !totals) throw new Error('従業員の年間データが見つかりません');
+        const breakdown: AnnualMonthDto[] = months.map((month) => {
+          const value = month.employees.find((entry) => entry.employeeId === employeeId);
+          const pay = value ?? zeroPay();
+          return { month: month.month, attendanceCount: value?.attendanceCount ?? 0, totalMinutes: pay.totalMinutes, regularMinutes: pay.regularMinutes, nightMinutes: pay.nightMinutes, regularYen: pay.regularYen, nightYen: pay.nightYen, totalYen: pay.totalYen };
+        });
+        return { year, employee: employeeDto(employee), totals, months: breakdown };
+      }),
     },
     backup: {
       status: () => withRead(async (): Promise<BackupStatusDto> => { let persisted: boolean | null = null; let usage: number | null = null; let quota: number | null = null; try { persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : null; if (navigator.storage?.estimate) { const estimate = await navigator.storage.estimate(); usage = estimate.usage ?? null; quota = estimate.quota ?? null; } } catch { /* Browser storage status is advisory. */ } const lastSuccessAt = await meta<number>(db, 'backupLastSuccessAt') ?? null; const failure = await meta<{ at: number; message: string }>(db, 'backupLastFailure'); return { persisted, usage, quota, lastSuccessAt, lastFailureAt: failure?.at ?? null, lastFailure: failure?.message ?? null }; }),

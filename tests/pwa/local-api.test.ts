@@ -57,6 +57,47 @@ afterEach(async () => {
 });
 
 describe('PWA local API', () => {
+  it('aggregates month and year by the corrected JST clock-in date without double counting boundaries', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'e-boundary', name: '境界 花子', hourly_wage: 1200, night_hourly_wage: 1500, status: 'ACTIVE' } satisfies LocalEmployee);
+    const shifts: LocalShift[] = [
+      { id: 'aug-cross', employee_id: 'e-boundary', business_date: '2026-09-01', clock_in: at('2026-09-01T00:00:00Z'), clock_out: at('2026-09-01T01:00:00Z'), wage_snapshot: 1200, night_wage_snapshot: 1500, calc_status: 'CALCULATED', created_at: at('2026-09-01T00:00:00Z') },
+      { id: 'dec-cross', employee_id: 'e-boundary', business_date: '2026-12-31', clock_in: at('2026-12-31T13:00:00Z'), clock_out: at('2026-12-31T20:00:00Z'), wage_snapshot: 1200, night_wage_snapshot: 1500, calc_status: 'CALCULATED', created_at: at('2026-12-31T13:00:00Z') },
+      { id: 'jan-shift', employee_id: 'e-boundary', business_date: '2026-01-10', clock_in: at('2026-01-10T00:00:00Z'), clock_out: at('2026-01-10T08:00:00Z'), wage_snapshot: 1200, night_wage_snapshot: 1500, calc_status: 'CALCULATED', created_at: at('2026-01-10T00:00:00Z') },
+    ];
+    for (const shift of shifts) await put(dbName, 'shifts', shift);
+    await put(dbName, 'corrections', { id: 'aug-cross-correction', shift_id: 'aug-cross', start_at: at('2026-08-31T13:00:00Z'), end_at: at('2026-08-31T20:00:00Z'), hourly_wage: 1200, night_hourly_wage: 1500, reason: '実効出勤時刻の境界確認', calculation_method: 'HALF_HOUR', long_shift_confirmed: false, status: 'APPROVED', applied_at: at('2026-09-02T00:00:00Z'), created_at: at('2026-09-02T00:00:00Z') } satisfies LocalCorrection);
+
+    const august = await controller.api.monthly.summary('2026-08');
+    const september = await controller.api.monthly.summary('2026-09');
+    const december = await controller.api.monthly.summary('2026-12');
+    const january2027 = await controller.api.monthly.summary('2027-01');
+    expect(august.ok && august.data.employees[0]).toMatchObject({ employeeId: 'e-boundary', attendanceCount: 1, totalMinutes: 420, regularMinutes: 0, nightMinutes: 420 });
+    expect(september.ok && september.data.attendanceCount).toBe(0);
+    expect(december.ok && december.data.employees[0]).toMatchObject({ attendanceCount: 1, totalMinutes: 420, regularMinutes: 0, nightMinutes: 420 });
+    expect(january2027.ok && january2027.data.attendanceCount).toBe(0);
+
+    const annual = await controller.api.annual.summary('2026');
+    expect(annual.ok && annual.data.employees[0]).toMatchObject({ employeeId: 'e-boundary', attendanceCount: 3, totalMinutes: 1320, regularMinutes: 480, nightMinutes: 840 });
+    if (!annual.ok || !august.ok || !december.ok) throw new Error('expected summaries');
+    expect(annual.data.employees[0].totalYen).toBe(annual.data.employees[0].regularYen + annual.data.employees[0].nightYen);
+    expect(annual.data.employees[0].totalYen).toBe((await controller.api.monthly.summary('2026-01')).data!.employees[0].totalYen + august.data.employees[0].totalYen + december.data.employees[0].totalYen);
+
+    const detail = await controller.api.annual.employeeDetail('2026', 'e-boundary');
+    expect(detail.ok && detail.data.months).toHaveLength(12);
+    expect(detail.ok && detail.data.months.find((value) => value.month === '2026-08')).toMatchObject({ attendanceCount: 1, totalMinutes: 420, totalYen: august.data.employees[0].totalYen });
+    expect(detail.ok && detail.data.months.find((value) => value.month === '2026-09')).toMatchObject({ attendanceCount: 0, totalMinutes: 0, totalYen: 0 });
+  });
+
+  it('strictly validates annual aggregate year input', async () => {
+    const { controller } = await setup();
+    for (const year of ['26', '2026-01', '２０２６', '202a', ' 2026']) {
+      const result = await controller.api.annual.summary(year);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.message).toContain('対象年');
+    }
+  });
+
   it('does not expose internal English errors to the PIN screen', async () => {
     const dbName = `pwa-test-${crypto.randomUUID()}`;
     names.push(dbName);

@@ -166,6 +166,30 @@ export interface MonthlyEmployeeDetailDto {
   days: Array<{ date: string; shifts: AttendanceShiftDto[]; totals: PayBreakdownDto }>;
 }
 
+export interface AnnualEmployeeDto extends PayBreakdownDto {
+  employeeId: string;
+  employeeName: string;
+  attendanceCount: number;
+}
+
+export interface AnnualSummaryDto extends PayBreakdownDto {
+  year: string;
+  employees: AnnualEmployeeDto[];
+  attendanceCount: number;
+}
+
+export interface AnnualMonthDto extends PayBreakdownDto {
+  month: string;
+  attendanceCount: number;
+}
+
+export interface AnnualEmployeeDetailDto {
+  year: string;
+  employee: EmployeeDto;
+  totals: AnnualEmployeeDto;
+  months: AnnualMonthDto[];
+}
+
 export interface BackupItemDto {
   id: string;
   fileName: string;
@@ -226,6 +250,10 @@ export interface PwaAttendanceApi {
     reopen(input: Command<{ month: string }>): Promise<Result<MonthlySummaryDto>>;
     exportCsv(month: string): Promise<Result<{ fileName: string; mimeType: string; csv: string }>>;
     print(month: string): Promise<Result<MonthlySummaryDto>>;
+  };
+  annual: {
+    summary(year: string): Promise<Result<AnnualSummaryDto>>;
+    employeeDetail(year: string, employeeId: string): Promise<Result<AnnualEmployeeDetailDto>>;
   };
   backup: {
     status(): Promise<Result<BackupStatusDto>>;
