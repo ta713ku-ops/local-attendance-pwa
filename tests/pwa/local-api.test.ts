@@ -381,6 +381,36 @@ describe('PWA local API', () => {
     expect(backups.some((x) => x.kind === 'PRE_RESTORE')).toBe(true);
   });
 
+  it('creates one AUTO on the same JST day and another after the JST day changes', async () => {
+    let current = at('2026-08-01T14:59:00Z'); // 23:59 JST
+    const dbName = `pwa-test-${crypto.randomUUID()}`;
+    names.push(dbName);
+    const controller = await createLocalAttendanceApi({ dbName, now: () => current });
+    controllers.push(controller);
+    expect((await controller.api.adminAuth.setup(command({ pin: '123456' }))).ok).toBe(true);
+    await controller.ensureAutoBackup();
+    await controller.ensureAutoBackup();
+    const sameDay = await controller.api.backup.list();
+    expect(sameDay.ok && sameDay.data.filter((item) => item.kind === 'AUTO')).toHaveLength(1);
+    current = at('2026-08-01T15:01:00Z'); // 00:01 JST on the next day
+    await controller.ensureAutoBackup();
+    const list = await controller.api.backup.list();
+    expect(list.ok && list.data.filter((item) => item.kind === 'AUTO')).toHaveLength(2);
+  });
+
+  it('keeps admin authentication until it is explicitly locked', async () => {
+    let current = at('2026-08-01T03:00:00Z');
+    const dbName = `pwa-test-${crypto.randomUUID()}`;
+    names.push(dbName);
+    const controller = await createLocalAttendanceApi({ dbName, now: () => current });
+    controllers.push(controller);
+    expect((await controller.api.adminAuth.setup(command({ pin: '123456' }))).ok).toBe(true);
+    current += 6 * 60_000;
+    expect((await controller.api.employees.list()).ok).toBe(true);
+    await controller.api.adminAuth.lock();
+    expect((await controller.api.employees.list()).ok).toBe(false);
+  });
+
   it('rejects missing required stores and required fields before restore', async () => {
     const { controller } = await setup();
     const missingStore = JSON.parse(await controller.exportBackupJson());
