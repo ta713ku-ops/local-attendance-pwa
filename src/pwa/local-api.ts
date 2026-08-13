@@ -3,12 +3,12 @@ import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { allocateEmployeeMonthPay, calculateShift, formatJstDate, formatJstMonth, getAttendanceStatus, TWENTY_FOUR_HOURS_MS } from '../domain';
 import type {
-  AnnualEmployeeDetailDto, AnnualEmployeeDto, AnnualMonthDto, AnnualSummaryDto, AttendanceDayDto, AttendanceShiftDto, BackupItemDto, BackupStatusDto, CorrectionDetailDto,
+  AnnualEmployeeDetailDto, AnnualEmployeeDto, AnnualMonthDto, AnnualSummaryDto, AttendanceDayDto, AttendanceShiftDto, BackupStatusDto, CorrectionDetailDto,
   CorrectionHistoryDto, CorrectionInput, EmployeeDto, MonthlyEmployeeDetailDto, MonthlyEmployeeDto,
   MonthlySummaryDto, PayBreakdownDto, PwaAttendanceApi,
 } from './pwa-api.types';
 import type {
-  LocalBackup, LocalBackupPayload, LocalBackupPayloadV2, LocalCorrection, LocalEmployee, LocalException, LocalLog,
+  LocalBackupPayload, LocalBackupPayloadV2, LocalCorrection, LocalEmployee, LocalException, LocalLog,
   LocalPeriod, LocalReceipt, LocalShift, SnapshotStoreName, StoreName,
 } from './local-api.types';
 
@@ -35,7 +35,13 @@ const uuid = () => {
   const hex = [...value].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
-const jstDayNumber = (at: number) => Math.floor((at + 9 * 60 * 60 * 1000) / 86_400_000);
+const protectedBackupMetaKeys = new Set(['administrator', 'backupLastExportedAt', 'backupLastSuccessAt', 'backupLastFailure']);
+const isProtectedBackupMeta = (item: unknown) => item != null && typeof item === 'object' && protectedBackupMetaKeys.has((item as { key?: unknown }).key as string);
+const backupFileName = (createdAt: number) => {
+  const date = new Date(createdAt + 9 * 60 * 60 * 1000);
+  const part = (value: number) => String(value).padStart(2, '0');
+  return `backup_${date.getUTCFullYear()}-${part(date.getUTCMonth() + 1)}-${part(date.getUTCDate())}_${part(date.getUTCHours())}${part(date.getUTCMinutes())}.json`;
+};
 const validateMonth = (value: string) => { if (!/^\d{4}-\d{2}$/.test(value)) throw new Error('対象月を確認してください'); };
 const validateYear = (value: string) => { if (!/^\d{4}$/.test(value)) throw new Error('対象年を確認してください'); };
 const validateDate = (value: string) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('対象日を確認してください'); };
@@ -122,7 +128,8 @@ function allocateMonthlyPay(rows: EffectiveRow[]): Map<string, PayBreakdownDto> 
 function validateBackup(value: unknown): LocalBackupPayloadV2 {
   if (!value || typeof value !== 'object') throw new Error('バックアップJSONが壊れています');
   const payload = value as Partial<LocalBackupPayload>;
-  if (payload.format !== 'local-attendance-pwa-backup' || (payload.version !== 1 && payload.version !== 2) || !payload.stores || typeof payload.exportedAt !== 'number') throw new Error('対応していないバックアップです');
+  const exportedAt = payload.exportedAt;
+  if (payload.format !== 'local-attendance-pwa-backup' || (payload.version !== 1 && payload.version !== 2) || !payload.stores || typeof exportedAt !== 'number' || !Number.isSafeInteger(exportedAt) || exportedAt <= 0) throw new Error('対応していないバックアップです');
   const stores = {} as Record<SnapshotStoreName, unknown[]>;
   for (const name of SNAPSHOT_STORES) {
     const rows = payload.stores[name];
@@ -148,7 +155,7 @@ function validateBackup(value: unknown): LocalBackupPayloadV2 {
   if (shifts.some((x) => !employeeIds.has((x as LocalShift).employee_id))) throw new Error('勤務が存在しない従業員を参照しています');
   const shiftIds = new Set(shifts.map((x) => (x as LocalShift).id));
   if ([...stores.corrections, ...stores.exceptions].some((x) => !shiftIds.has((x as LocalCorrection | LocalException).shift_id))) throw new Error('訂正または例外が存在しない勤務を参照しています');
-  return { format: 'local-attendance-pwa-backup', version: 2, exportedAt: payload.exportedAt, stores };
+  return { format: 'local-attendance-pwa-backup', version: 2, exportedAt, stores };
 }
 
 function storeKey(name: SnapshotStoreName, value: unknown): IDBValidKey | undefined {
@@ -160,9 +167,6 @@ function storeKey(name: SnapshotStoreName, value: unknown): IDBValidKey | undefi
 
 export interface LocalAttendanceController {
   api: PwaAttendanceApi;
-  exportBackupJson(): Promise<string>;
-  importBackupJson(json: string): Promise<Result<{ imported: true; requiresReauthentication: true }>>;
-  ensureAutoBackup(): Promise<void>;
   close(): void;
 }
 
@@ -173,6 +177,7 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
   // explicitly cleared on lock and after a successful restore.
   let adminAuthenticated = false;
   let writeQueue: Promise<void> = Promise.resolve();
+  const preparedExportTimes = new Set<number>();
   const serialized = <T>(operation: () => Promise<T>): Promise<T> => { const next = writeQueue.then(operation, operation); writeQueue = next.then(() => undefined, () => undefined); return next; };
   const requireAdmin = () => { if (!adminAuthenticated) throw new Error('再認証が必要です'); };
   const verifyAdminSecret = async (pin: string) => { validatePin(pin); const admin = await meta<AdminRecord>(db, 'administrator'); if (!admin) throw new Error('管理者PINが未設定です'); if (admin.lockedUntil > now()) throw new Error('一時的にロックされています'); if (!(await checkSecret(pin, admin.pinHash))) { const failedCount = admin.failedCount + 1; await setMeta(db, 'administrator', { ...admin, failedCount: failedCount >= 5 ? 0 : failedCount, lockedUntil: failedCount >= 5 ? now() + 300_000 : 0 }); throw new Error('管理者PINが正しくありません'); } await setMeta(db, 'administrator', { ...admin, failedCount: 0, lockedUntil: 0 }); return admin; };
@@ -205,12 +210,11 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
     return { year, employees, attendanceCount: employees.reduce((sum, employee) => sum + employee.attendanceCount, 0), ...employees.reduce<PayBreakdownDto>((acc, employee) => addPay(acc, employee), zeroPay()) };
   };
 
-  const exportPayload = async (): Promise<LocalBackupPayload> => { const stores = {} as Record<SnapshotStoreName, unknown[]>; for (const store of SNAPSHOT_STORES) stores[store] = await getAll(db, store); return { format: 'local-attendance-pwa-backup', version: 2, exportedAt: now(), stores }; };
-  const pruneBackups = async () => { const cutoff = jstDayNumber(now()) - 90; const old = (await getAll<LocalBackup>(db, 'backups')).filter((x) => jstDayNumber(x.created_at) < cutoff); if (!old.length) return; const tx = db.transaction('backups', 'readwrite'); for (const item of old) tx.objectStore('backups').delete(item.id); await transactionDone(tx); };
-  const createBackup = async (kind: LocalBackup['kind']): Promise<LocalBackup> => { try { await pruneBackups(); const snapshot = await exportPayload(); const json = JSON.stringify(snapshot); const item: LocalBackup = { id: uuid(), file_name: `local-attendance-${new Date(now()).toISOString().replace(/[:.]/g, '-')}-${kind}.json`, kind, status: 'SUCCESS', size: encoder.encode(json).byteLength, created_at: now(), error: null, snapshot }; await putOne(db, 'backups', item); await setMeta(db, 'backupLastSuccessAt', item.created_at); await setMeta(db, 'backupLastFailure', null); await pruneBackups(); return item; } catch (error) { try { await setMeta(db, 'backupLastFailure', { at: now(), message: error instanceof Error ? error.message : 'バックアップに失敗しました' }); } catch { /* A quota failure can also prevent recording its status. */ } throw error; } };
-  const ensureAutoBackup = () => serialized(async () => { const today = jstDayNumber(now()); if ((await getAll<LocalBackup>(db, 'backups')).some((x) => x.kind === 'AUTO' && x.status === 'SUCCESS' && jstDayNumber(x.created_at) === today)) { await pruneBackups(); return; } try { await createBackup('AUTO'); } catch (error) { await setMeta(db, 'backupLastFailure', { at: now(), message: error instanceof Error ? error.message : '自動バックアップに失敗しました' }); } });
-  const restorePayload = async (payload: LocalBackupPayload) => { const administrator = await meta<AdminRecord>(db, 'administrator'); await createBackup('PRE_RESTORE'); const tx = db.transaction(SNAPSHOT_STORES, 'readwrite'); try { const expected = new Map<SnapshotStoreName, number>(); for (const name of SNAPSHOT_STORES) { const items = (payload.stores[name] ?? []).filter((item) => !(name === 'meta' && (item as { key?: string }).key === 'administrator')); expected.set(name, items.length + (name === 'meta' && administrator ? 1 : 0)); const store = tx.objectStore(name); store.clear(); for (const item of items) store.put(item); } if (administrator) tx.objectStore('meta').put({ key: 'administrator', value: administrator }); for (const name of SNAPSHOT_STORES) { const count = await request(tx.objectStore(name).count()); if (count !== expected.get(name)) throw new Error(`${name} の復元件数が一致しません`); } if (administrator) { const restoredAdmin = await request<{ key: string; value: AdminRecord } | undefined>(tx.objectStore('meta').get('administrator')); if (!restoredAdmin || restoredAdmin.value.pinHash !== administrator.pinHash || restoredAdmin.value.recoveryHash !== administrator.recoveryHash) throw new Error('現在の管理者情報を維持できませんでした'); } await transactionDone(tx); adminAuthenticated = false; } catch (error) { try { tx.abort(); } catch { /* Already aborted. */ } throw error; } };
-  const importBackupJson = async (json: string): Promise<Result<{ imported: true; requiresReauthentication: true }>> => serialized(async () => { try { requireAdmin(); const payload = validateBackup(JSON.parse(json)); await restorePayload(payload); return ok({ imported: true, requiresReauthentication: true }); } catch (error) { return fail(error, true); } });
+  const exportPayload = async (): Promise<LocalBackupPayload> => { const stores = {} as Record<SnapshotStoreName, unknown[]>; for (const store of SNAPSHOT_STORES) stores[store] = (await getAll(db, store)).filter((item) => store !== 'meta' || !isProtectedBackupMeta(item)); return { format: 'local-attendance-pwa-backup', version: 2, exportedAt: now(), stores }; };
+  const restorePayload = async (payload: LocalBackupPayload) => { const administrator = await meta<AdminRecord>(db, 'administrator'); const lastBackupAt = await meta<number>(db, 'backupLastExportedAt'); const preservedMeta = [
+    ...(administrator ? [{ key: 'administrator', value: administrator }] : []),
+    ...(typeof lastBackupAt === 'number' ? [{ key: 'backupLastExportedAt', value: lastBackupAt }] : []),
+  ]; const tx = db.transaction(SNAPSHOT_STORES, 'readwrite'); try { const expected = new Map<SnapshotStoreName, number>(); for (const name of SNAPSHOT_STORES) { const items = (payload.stores[name] ?? []).filter((item) => name !== 'meta' || !isProtectedBackupMeta(item)); expected.set(name, items.length + (name === 'meta' ? preservedMeta.length : 0)); const store = tx.objectStore(name); store.clear(); for (const item of items) store.put(item); } for (const item of preservedMeta) tx.objectStore('meta').put(item); for (const name of SNAPSHOT_STORES) { const count = await request(tx.objectStore(name).count()); if (count !== expected.get(name)) throw new Error(`${name} の復元件数が一致しません`); } if (administrator) { const restoredAdmin = await request<{ key: string; value: AdminRecord } | undefined>(tx.objectStore('meta').get('administrator')); if (!restoredAdmin || restoredAdmin.value.pinHash !== administrator.pinHash || restoredAdmin.value.recoveryHash !== administrator.recoveryHash) throw new Error('現在の管理者情報を維持できませんでした'); } await transactionDone(tx); adminAuthenticated = false; } catch (error) { try { tx.abort(); } catch { /* Already aborted. */ } throw error; } };
 
   const api: PwaAttendanceApi = {
     clock: {
@@ -288,18 +292,23 @@ export async function createLocalAttendanceApi(options: { dbName?: string; now?:
       }),
     },
     backup: {
-      status: () => withRead(async (): Promise<BackupStatusDto> => { let persisted: boolean | null = null; let usage: number | null = null; let quota: number | null = null; try { persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : null; if (navigator.storage?.estimate) { const estimate = await navigator.storage.estimate(); usage = estimate.usage ?? null; quota = estimate.quota ?? null; } } catch { /* Browser storage status is advisory. */ } const lastSuccessAt = await meta<number>(db, 'backupLastSuccessAt') ?? null; const failure = await meta<{ at: number; message: string }>(db, 'backupLastFailure'); return { persisted, usage, quota, lastSuccessAt, lastFailureAt: failure?.at ?? null, lastFailure: failure?.message ?? null }; }),
-      list: () => withRead(async () => (await getAll<LocalBackup>(db, 'backups')).sort((a, b) => b.created_at - a.created_at).map((x): BackupItemDto => ({ id: x.id, fileName: x.file_name, kind: x.kind, status: x.status, size: x.size, createdAt: x.created_at, error: x.error ?? null }))),
-      create: (input) => command('backup:create', input, async () => { const item = await createBackup(input.kind ?? 'MANUAL'); return { id: item.id, fileName: item.file_name, kind: item.kind, status: item.status, size: item.size, createdAt: item.created_at, error: item.error ?? null }; }),
-      export: (id) => withRead(async () => { const item = await getOne<LocalBackup>(db, 'backups', id); if (!item?.snapshot) throw new Error('バックアップが見つかりません'); return { fileName: item.file_name, json: JSON.stringify(item.snapshot) }; }),
-      restore: (input) => command('backup:restore', input, async () => { const item = await getOne<LocalBackup>(db, 'backups', input.id); if (!item?.snapshot) throw new Error('バックアップが見つかりません'); await restorePayload(validateBackup(item.snapshot)); return { restored: true as const, requiresReauthentication: true as const }; }),
+      status: () => withRead(async (): Promise<BackupStatusDto> => ({ lastBackupAt: await meta<number>(db, 'backupLastExportedAt') ?? null })),
+      prepareExport: () => withRead(async () => { const payload = await exportPayload(); preparedExportTimes.add(payload.exportedAt); return { fileName: backupFileName(payload.exportedAt), json: JSON.stringify(payload), createdAt: payload.exportedAt }; }),
+      markExportSaved: (input) => command('backup:mark-export-saved', input, async () => {
+        if (!Number.isSafeInteger(input.createdAt) || input.createdAt <= 0 || !preparedExportTimes.has(input.createdAt)) throw new Error('バックアップの保存状態を確認できません。もう一度バックアップを作成してください。');
+        const current = await meta<number>(db, 'backupLastExportedAt');
+        if (typeof current === 'number' && input.createdAt < current) throw new Error('新しいバックアップの保存後に、もう一度お試しください。');
+        preparedExportTimes.delete(input.createdAt);
+        await setMeta(db, 'backupLastExportedAt', input.createdAt);
+        return { lastBackupAt: input.createdAt };
+      }),
+      inspectImport: (json) => withRead(async () => ({ createdAt: validateBackup(JSON.parse(json)).exportedAt })),
+      restoreImport: (input) => command('backup:restore-import', input, async () => { await restorePayload(validateBackup(JSON.parse(input.json))); return { restored: true as const, requiresReauthentication: true as const }; }),
     },
   };
-  return { api, exportBackupJson: async () => { requireAdmin(); return JSON.stringify(await exportPayload()); }, importBackupJson, ensureAutoBackup, close: () => db.close() };
+  return { api, close: () => db.close() };
 }
 
 let installedController: LocalAttendanceController | undefined;
 export async function installLocalAttendanceApi(target: Window = window, options: { dbName?: string; now?: () => number } = {}): Promise<LocalAttendanceController> { const controller = await createLocalAttendanceApi(options); try { Object.defineProperty(target, 'attendance', { value: Object.freeze(controller.api), configurable: true, writable: false }); } catch (error) { controller.close(); throw error; } installedController?.close(); installedController = controller; return controller; }
-export async function restoreBackupFile(file: File): Promise<Result<{ imported: true; requiresReauthentication: true }>> { if (!installedController) return { ok: false, code: 'NOT_INITIALIZED', message: 'ローカル勤怠データが開始されていません。' }; if (!file || typeof file.text !== 'function') return { ok: false, code: 'INVALID_BACKUP_FILE', message: 'バックアップファイルを選択してください。' }; try { return await installedController.importBackupJson(await file.text()); } catch (error) { return fail(error, true); } }
-export async function exportBackup(): Promise<{ fileName: string; json: string }> { if (!installedController) throw new Error('ローカル勤怠データが開始されていません。'); return { fileName: `local-attendance-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, json: await installedController.exportBackupJson() }; }
 export const installWebAttendanceApi = installLocalAttendanceApi;

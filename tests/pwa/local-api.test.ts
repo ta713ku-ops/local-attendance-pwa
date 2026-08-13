@@ -298,11 +298,10 @@ describe('PWA local API', () => {
     expect(logs).toContainEqual(expect.objectContaining({ kind: 'ATTENDANCE_VOID', target_id: 's1', request_id: requestId }));
     const receipts = await all<Record<string, unknown>>(dbName, 'receipts');
     expect(JSON.stringify({ logs, receipts })).not.toContain('123456');
-    const backup = await controller.api.backup.create(command({ kind: 'MANUAL' as const }));
+    const backup = await controller.api.backup.prepareExport();
     expect(backup.ok).toBe(true);
-    const exported = backup.ok ? await controller.api.backup.export(backup.data.id) : null;
-    expect(exported?.ok && exported.data.json).toContain('voided_at');
-    expect(exported?.ok && exported.data.json).not.toContain('123456');
+    expect(backup.ok && backup.data.json).toContain('voided_at');
+    expect(backup.ok && backup.data.json).not.toContain('123456');
   });
 
   it('rejects voiding an effective shift in a closed month', async () => {
@@ -360,42 +359,23 @@ describe('PWA local API', () => {
     expect(close.ok && close.data.status).toBe('CLOSED');
   });
 
-  it('creates one AUTO per JST day, exports v2, and restores v1 without replacing admin auth', async () => {
+  it('prepares a v2 file without auth or backup-status meta, and records only a confirmed save', async () => {
     const { dbName, controller } = await setup();
-    await controller.ensureAutoBackup();
-    await controller.ensureAutoBackup();
-    const list = await controller.api.backup.list();
-    expect(list.ok && list.data.filter((x) => x.kind === 'AUTO')).toHaveLength(1);
-    const exported = JSON.parse(await controller.exportBackupJson());
+    await put(dbName, 'meta', { key: 'backupLastSuccessAt', value: 1 });
+    await put(dbName, 'backups', { id: 'legacy-backup', file_name: 'legacy.json', kind: 'MANUAL', status: 'SUCCESS', size: 1, created_at: 1 } satisfies LocalBackup);
+    const prepared = await controller.api.backup.prepareExport();
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('expected prepared export');
+    const exported = JSON.parse(prepared.data.json);
     expect(exported.version).toBe(2);
-    exported.version = 1;
-    const incomingAdmin = exported.stores.meta.find((x: { key?: string }) => x.key === 'administrator');
-    incomingAdmin.value.pinHash = 'malicious';
-    const restored = await controller.importBackupJson(JSON.stringify(exported));
-    expect(restored).toEqual({ ok: true, data: { imported: true, requiresReauthentication: true } });
-    const locked = await controller.api.employees.list();
-    expect(locked.ok).toBe(false);
-    const verified = await controller.api.adminAuth.verify(command({ pin: '123456' }));
-    expect(verified.ok).toBe(true);
-    const backups = await all<LocalBackup>(dbName, 'backups');
-    expect(backups.some((x) => x.kind === 'PRE_RESTORE')).toBe(true);
-  });
-
-  it('creates one AUTO on the same JST day and another after the JST day changes', async () => {
-    let current = at('2026-08-01T14:59:00Z'); // 23:59 JST
-    const dbName = `pwa-test-${crypto.randomUUID()}`;
-    names.push(dbName);
-    const controller = await createLocalAttendanceApi({ dbName, now: () => current });
-    controllers.push(controller);
-    expect((await controller.api.adminAuth.setup(command({ pin: '123456' }))).ok).toBe(true);
-    await controller.ensureAutoBackup();
-    await controller.ensureAutoBackup();
-    const sameDay = await controller.api.backup.list();
-    expect(sameDay.ok && sameDay.data.filter((item) => item.kind === 'AUTO')).toHaveLength(1);
-    current = at('2026-08-01T15:01:00Z'); // 00:01 JST on the next day
-    await controller.ensureAutoBackup();
-    const list = await controller.api.backup.list();
-    expect(list.ok && list.data.filter((item) => item.kind === 'AUTO')).toHaveLength(2);
+    expect(exported.stores.meta.some((row: { key?: string }) => row.key === 'administrator')).toBe(false);
+    expect(exported.stores.meta.some((row: { key?: string }) => row.key?.startsWith('backupLast'))).toBe(false);
+    expect(prepared.data.fileName).toBe('backup_2026-08-01_1200.json');
+    expect((await controller.api.backup.status()).data).toEqual({ lastBackupAt: null });
+    expect((await controller.api.backup.markExportSaved(command({ createdAt: prepared.data.createdAt }))).data).toEqual({ lastBackupAt: prepared.data.createdAt });
+    expect((await controller.api.backup.status()).data).toEqual({ lastBackupAt: prepared.data.createdAt });
+    expect((await controller.api.backup.markExportSaved(command({ createdAt: prepared.data.createdAt }))).ok).toBe(false);
+    expect(await all<LocalBackup>(dbName, 'backups')).toEqual([expect.objectContaining({ id: 'legacy-backup' })]);
   });
 
   it('keeps admin authentication until it is explicitly locked', async () => {
@@ -413,12 +393,14 @@ describe('PWA local API', () => {
 
   it('rejects missing required stores and required fields before restore', async () => {
     const { controller } = await setup();
-    const missingStore = JSON.parse(await controller.exportBackupJson());
+    const prepared = await controller.api.backup.prepareExport();
+    if (!prepared.ok) throw new Error('expected prepared export');
+    const missingStore = JSON.parse(prepared.data.json);
     delete missingStore.stores.shifts;
-    expect((await controller.importBackupJson(JSON.stringify(missingStore))).ok).toBe(false);
-    const missingField = JSON.parse(await controller.exportBackupJson());
+    expect((await controller.api.backup.inspectImport(JSON.stringify(missingStore))).ok).toBe(false);
+    const missingField = JSON.parse(prepared.data.json);
     missingField.stores.employees.push({ id: 'broken', name: '壊れたデータ' });
-    expect((await controller.importBackupJson(JSON.stringify(missingField))).ok).toBe(false);
+    expect((await controller.api.backup.inspectImport(JSON.stringify(missingField))).ok).toBe(false);
   });
 
   it('migrates a minimal v1 fixture by defaulting omitted stores', async () => {
@@ -427,7 +409,7 @@ describe('PWA local API', () => {
       format: 'local-attendance-pwa-backup', version: 1, exportedAt: at('2025-01-01T00:00:00Z'),
       stores: { employees: [{ id: 'v1-employee', name: '旧形式', hourly_wage: 900 }], shifts: [] },
     };
-    const result = await controller.importBackupJson(JSON.stringify(fixture));
+    const result = await controller.api.backup.restoreImport(command({ json: JSON.stringify(fixture) }));
     expect(result.ok).toBe(true);
     expect(await all<LocalEmployee>(dbName, 'employees')).toEqual([expect.objectContaining({ id: 'v1-employee' })]);
     expect((await controller.api.adminAuth.verify(command({ pin: '123456' }))).ok).toBe(true);
@@ -436,12 +418,14 @@ describe('PWA local API', () => {
   it('rejects duplicate keys without changing existing data', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'keep', name: '既存', hourly_wage: 1000 } satisfies LocalEmployee);
-    const payload = JSON.parse(await controller.exportBackupJson());
+    const prepared = await controller.api.backup.prepareExport();
+    if (!prepared.ok) throw new Error('expected prepared export');
+    const payload = JSON.parse(prepared.data.json);
     payload.stores.employees = [
       { id: 'duplicate', name: '一件目', hourly_wage: 1000 },
       { id: 'duplicate', name: '二件目', hourly_wage: 1200 },
     ];
-    const result = await controller.importBackupJson(JSON.stringify(payload));
+    const result = await controller.api.backup.restoreImport(command({ json: JSON.stringify(payload) }));
     expect(result.ok).toBe(false);
     expect(await all<LocalEmployee>(dbName, 'employees')).toEqual([expect.objectContaining({ id: 'keep', name: '既存' })]);
   });
@@ -449,7 +433,9 @@ describe('PWA local API', () => {
   it('rolls back replaced stores when IndexedDB fails midway through the transaction', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'keep', name: '既存', hourly_wage: 1000 } satisfies LocalEmployee);
-    const payload = JSON.parse(await controller.exportBackupJson());
+    const prepared = await controller.api.backup.prepareExport();
+    if (!prepared.ok) throw new Error('expected prepared export');
+    const payload = JSON.parse(prepared.data.json);
     payload.stores.employees = [{ id: 'replacement', name: '置換予定', hourly_wage: 1200 }];
     payload.stores.logs.push({ id: 'force-failure', created_at: 1, kind: 'TEST', result: 'SUCCESS' });
     const originalPut = IDBObjectStore.prototype.put;
@@ -458,45 +444,53 @@ describe('PWA local API', () => {
       return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
     };
     try {
-      expect((await controller.importBackupJson(JSON.stringify(payload))).ok).toBe(false);
+      expect((await controller.api.backup.restoreImport(command({ json: JSON.stringify(payload) }))).ok).toBe(false);
     } finally {
       IDBObjectStore.prototype.put = originalPut;
     }
     expect(await all<LocalEmployee>(dbName, 'employees')).toEqual([expect.objectContaining({ id: 'keep', name: '既存' })]);
   });
 
-  it('deletes only internal backups older than 90 JST days', async () => {
-    const now = at('2026-08-01T03:00:00Z');
-    const { dbName, controller } = await setup(now);
-    const snapshot = JSON.parse(await controller.exportBackupJson());
-    await put(dbName, 'backups', { id: 'old', file_name: 'old.json', kind: 'MANUAL', status: 'SUCCESS', size: 1, created_at: now - 91 * 86_400_000, snapshot } satisfies LocalBackup);
-    await put(dbName, 'backups', { id: 'boundary', file_name: 'boundary.json', kind: 'MANUAL', status: 'SUCCESS', size: 1, created_at: now - 90 * 86_400_000, snapshot } satisfies LocalBackup);
-    await controller.ensureAutoBackup();
-    const ids = (await all<LocalBackup>(dbName, 'backups')).map((x) => x.id);
-    expect(ids).not.toContain('old');
-    expect(ids).toContain('boundary');
+  it('inspects before restoring, preserves auth and last backup time, then locks after restore', async () => {
+    const { dbName, controller } = await setup();
+    await put(dbName, 'employees', { id: 'keep', name: '現在のデータ', hourly_wage: 1000 } satisfies LocalEmployee);
+    await put(dbName, 'backups', { id: 'legacy-backup', file_name: 'legacy.json', kind: 'MANUAL', status: 'SUCCESS', size: 1, created_at: 1 } satisfies LocalBackup);
+    const prepared = await controller.api.backup.prepareExport();
+    if (!prepared.ok) throw new Error('expected prepared export');
+    await controller.api.backup.markExportSaved(command({ createdAt: prepared.data.createdAt }));
+    const payload = JSON.parse(prepared.data.json);
+    payload.version = 1;
+    payload.stores.employees = [{ id: 'restored', name: '復元データ', hourly_wage: 1200 }];
+    payload.stores.meta.push({ key: 'administrator', value: { pinHash: 'malicious' } });
+    payload.stores.meta.push({ key: 'backupLastExportedAt', value: 1 });
+    expect((await controller.api.backup.inspectImport(JSON.stringify(payload))).data).toEqual({ createdAt: prepared.data.createdAt });
+    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual([expect.objectContaining({ id: 'keep' })]);
+    expect((await controller.api.backup.restoreImport(command({ json: JSON.stringify(payload) }))).ok).toBe(true);
+    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual([expect.objectContaining({ id: 'restored' })]);
+    expect((await controller.api.employees.list()).ok).toBe(false);
+    expect((await controller.api.adminAuth.verify(command({ pin: '123456' }))).ok).toBe(true);
+    expect((await controller.api.backup.status()).data).toEqual({ lastBackupAt: prepared.data.createdAt });
+    expect(await all<LocalBackup>(dbName, 'backups')).toEqual([expect.objectContaining({ id: 'legacy-backup' })]);
   });
 
-  it('records quota failure without changing attendance data', async () => {
-    const { dbName, controller } = await setup();
-    await put(dbName, 'employees', { id: 'keep', name: '既存従業員', hourly_wage: 1000 } satisfies LocalEmployee);
-    const before = await all<LocalEmployee>(dbName, 'employees');
-    const originalPut = IDBObjectStore.prototype.put;
-    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
-      if (this.name === 'backups') throw new DOMException('storage quota exceeded', 'QuotaExceededError');
-      return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
-    };
-    let result;
-    try {
-      result = await controller.api.backup.create(command({ kind: 'MANUAL' as const }));
-    } finally {
-      IDBObjectStore.prototype.put = originalPut;
-    }
-    expect(result?.ok).toBe(false);
-    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual(before);
-    const status = await controller.api.backup.status();
-    expect(status.ok && status.data.lastFailureAt).not.toBeNull();
-    expect(status.ok && status.data.lastFailure).toContain('storage quota exceeded');
+  it('rejects invalid import times and never rolls the last backup time backward', async () => {
+    let current = at('2026-08-01T03:00:00Z');
+    const dbName = `pwa-test-${crypto.randomUUID()}`;
+    names.push(dbName);
+    const controller = await createLocalAttendanceApi({ dbName, now: () => current });
+    controllers.push(controller);
+    expect((await controller.api.adminAuth.setup(command({ pin: '123456' }))).ok).toBe(true);
+    const first = await controller.api.backup.prepareExport();
+    if (!first.ok) throw new Error('expected prepared export');
+    await controller.api.backup.markExportSaved(command({ createdAt: first.data.createdAt }));
+    current -= 60_000;
+    const stale = await controller.api.backup.prepareExport();
+    if (!stale.ok) throw new Error('expected prepared export');
+    expect((await controller.api.backup.markExportSaved(command({ createdAt: stale.data.createdAt }))).ok).toBe(false);
+    expect((await controller.api.backup.status()).data).toEqual({ lastBackupAt: first.data.createdAt });
+    const invalid = JSON.parse(stale.data.json);
+    invalid.exportedAt = 0;
+    expect((await controller.api.backup.inspectImport(JSON.stringify(invalid))).ok).toBe(false);
   });
 
   it('returns exact shift and day decimals while keeping employee-month half-up totals', async () => {

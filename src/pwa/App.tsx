@@ -22,6 +22,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState(() => {
+    if (sessionStorage.getItem('attendance:backup-restored') !== '1') return '';
+    sessionStorage.removeItem('attendance:backup-restored');
+    return 'バックアップから復元しました。';
+  });
   const [recoveryCode, setRecoveryCode] = useState('');
   const [updateReady, setUpdateReady] = useState(Boolean(window.__PWA_UPDATE_READY__));
   const [updateRegistration, setUpdateRegistration] = useState<ServiceWorkerRegistration>();
@@ -31,6 +36,7 @@ export default function App() {
   const loadedHomeDate = useRef(jstDateKey(now));
   const loadHome = async () => { setLoading(true); setError(''); try { const data = await unwrap(pwaApi().clock.home()); setEmployees(data.employees); setConfigured(data.adminConfigured); } catch (cause) { setError(cause instanceof Error ? cause.message : '打刻画面を読み込めませんでした。'); } finally { setLoading(false); } };
   useEffect(() => { void loadHome(); const timer = window.setInterval(() => setNow(new Date()), 1000); return () => clearInterval(timer); }, []);
+  useEffect(() => { if (!success) return; const timer = window.setTimeout(() => setSuccess(''), 5000); return () => window.clearTimeout(timer); }, [success]);
   useEffect(() => {
     const currentDate = jstDateKey(now);
     if (view !== 'clock' || loadedHomeDate.current === currentDate) return;
@@ -94,6 +100,7 @@ export default function App() {
   const lock = async () => { await pwaApi().adminAuth.lock(); setView('clock'); await loadHome(); };
   return <main className="pwa-shell" onClickCapture={event => { const target = event.target as Element; rememberDialogTrigger(target.closest<HTMLElement>('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')); }}>
     {error && <div className="notice error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="エラーを閉じる">×</button></div>}
+    {success && <div className="notice success" role="status"><span>{success}</span><button onClick={() => setSuccess('')} aria-label="お知らせを閉じる">×</button></div>}
     {updateReady && <aside className="update-banner" role="status" aria-live="polite" aria-label="アプリの更新">
       <p><strong>新しいバージョンがあります</strong><span>打刻を終えてから更新できます。</span></p>
       <div className="update-actions"><button className="update-now" disabled={updating} onClick={() => void applyUpdate()}>{updating ? '更新しています…' : '今すぐ更新'}</button><button disabled={updating} onClick={() => setUpdateReady(false)}>あとで</button></div>

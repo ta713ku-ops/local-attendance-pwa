@@ -190,23 +190,8 @@ export interface AnnualEmployeeDetailDto {
   months: AnnualMonthDto[];
 }
 
-export interface BackupItemDto {
-  id: string;
-  fileName: string;
-  kind: BackupKind;
-  status: 'SUCCESS' | 'FAILED';
-  size: number;
-  createdAt: number;
-  error: string | null;
-}
-
 export interface BackupStatusDto {
-  persisted: boolean | null;
-  usage: number | null;
-  quota: number | null;
-  lastSuccessAt: number | null;
-  lastFailureAt: number | null;
-  lastFailure: string | null;
+  lastBackupAt: number | null;
 }
 
 export interface PwaAttendanceApi {
@@ -257,9 +242,9 @@ export interface PwaAttendanceApi {
   };
   backup: {
     status(): Promise<Result<BackupStatusDto>>;
-    list(): Promise<Result<BackupItemDto[]>>;
-    create(input: Command<{ kind?: 'MANUAL' }>): Promise<Result<BackupItemDto>>;
-    export(id: string): Promise<Result<{ fileName: string; json: string }>>;
-    restore(input: Command<{ id: string }>): Promise<Result<{ restored: true; requiresReauthentication: true }>>;
+    prepareExport(): Promise<Result<{ fileName: string; json: string; createdAt: number }>>;
+    markExportSaved(input: Command<{ createdAt: number }>): Promise<Result<{ lastBackupAt: number }>>;
+    inspectImport(json: string): Promise<Result<{ createdAt: number }>>;
+    restoreImport(input: Command<{ json: string }>): Promise<Result<{ restored: true; requiresReauthentication: true }>>;
   };
 }

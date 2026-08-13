@@ -65,11 +65,7 @@ const start = async () => {
   window.addEventListener('offline', setConnectionState);
 
   try {
-    const controller = await installWebAttendanceApi();
-    void controller.ensureAutoBackup();
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') void controller.ensureAutoBackup();
-    });
+    await installWebAttendanceApi();
   } catch (error) {
     console.error('ローカル勤怠データを開始できませんでした。', error);
   }
