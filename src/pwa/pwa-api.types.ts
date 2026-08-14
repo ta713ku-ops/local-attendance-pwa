@@ -212,6 +212,7 @@ export interface PwaAttendanceApi {
     list(includeArchived?: boolean): Promise<Result<EmployeeDto[]>>;
     create(input: Command<{ name: string; hourlyWage: number; nightHourlyWage?: number }>): Promise<Result<EmployeeDto>>;
     update(input: Command<{ id: string; name?: string; hourlyWage?: number; nightHourlyWage?: number }>): Promise<Result<{ id: string }>>;
+    bulkUpdateWages(input: Command<{ hourlyWage: number; nightHourlyWage: number }>): Promise<Result<{ updatedCount: number }>>;
     archive(input: Command<{ id: string }>): Promise<Result<{ id: string; status: 'ARCHIVED' }>>;
     restore(input: Command<{ id: string }>): Promise<Result<{ id: string; status: 'ACTIVE' }>>;
     permanentlyDelete(input: Command<{ id: string }>): Promise<Result<never>>;

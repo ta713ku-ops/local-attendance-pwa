@@ -175,6 +175,73 @@ describe('PWA local API', () => {
     expect(listed.ok && listed.data.find((row) => row.id === 'legacy')?.nightHourlyWage).toBeNull();
   });
 
+  it('bulk-updates only active current wages without changing historical pay, snapshots, or a restorable backup', async () => {
+    const { dbName, controller } = await setup(at('2026-08-10T00:00:00Z'));
+    const employees: LocalEmployee[] = [
+      { id: 'active', name: '在籍', hourly_wage: 1000, night_hourly_wage: 1250, status: 'ACTIVE' },
+      { id: 'legacy', name: '旧形式', hourly_wage: 1100 },
+      { id: 'archived', name: '削除済み', hourly_wage: 1200, night_hourly_wage: 1500, status: 'ARCHIVED' },
+    ];
+    for (const employee of employees) await put(dbName, 'employees', employee);
+    const historical: LocalShift = { id: 'historical', employee_id: 'active', business_date: '2026-08-01', clock_in: at('2026-08-01T12:30:00Z'), clock_out: at('2026-08-01T15:30:00Z'), wage_snapshot: 1000, night_wage_snapshot: 1250, calc_status: 'CALCULATED', created_at: at('2026-08-01T12:30:00Z') };
+    await put(dbName, 'shifts', historical);
+
+    const before = {
+      month: await controller.api.monthly.summary('2026-08'),
+      annual: await controller.api.annual.summary('2026'),
+      csv: await controller.api.monthly.exportCsv('2026-08'),
+      print: await controller.api.monthly.print('2026-08'),
+      backup: await controller.api.backup.prepareExport(),
+      employees: await all<LocalEmployee>(dbName, 'employees'),
+      shifts: await all<LocalShift>(dbName, 'shifts'),
+    };
+    expect(before.backup.ok).toBe(true);
+
+    for (const hourlyWage of [0, -1, 1000.5, Number.NaN]) {
+      expect((await controller.api.employees.bulkUpdateWages(command({ hourlyWage, nightHourlyWage: 1800 }))).ok).toBe(false);
+    }
+    for (const nightHourlyWage of [0, -1, 1800.5, Number.NaN]) {
+      expect((await controller.api.employees.bulkUpdateWages(command({ hourlyWage: 1400, nightHourlyWage }))).ok).toBe(false);
+    }
+    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual(before.employees);
+    expect(await all<LocalShift>(dbName, 'shifts')).toEqual(before.shifts);
+    expect((await all<Record<string, unknown>>(dbName, 'logs')).filter((row) => row.kind === 'EMPLOYEE_BULK_WAGE_UPDATE')).toHaveLength(0);
+
+    const requestId = 'bulk-wage-update-once';
+    const input = { hourlyWage: 1400, nightHourlyWage: 1800, requestId };
+    const first = await controller.api.employees.bulkUpdateWages(input);
+    const repeated = await controller.api.employees.bulkUpdateWages(input);
+    expect(first).toEqual({ ok: true, data: { updatedCount: 2 } });
+    expect(repeated).toEqual(first);
+    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'active', hourly_wage: 1400, night_hourly_wage: 1800 }),
+      expect.objectContaining({ id: 'legacy', hourly_wage: 1400, night_hourly_wage: 1800 }),
+      expect.objectContaining({ id: 'archived', hourly_wage: 1200, night_hourly_wage: 1500, status: 'ARCHIVED' }),
+    ]));
+    expect((await all<LocalShift>(dbName, 'shifts')).find((row) => row.id === historical.id)).toEqual(historical);
+    expect((await all<Record<string, unknown>>(dbName, 'logs')).filter((row) => row.kind === 'EMPLOYEE_BULK_WAGE_UPDATE')).toEqual([
+      expect.objectContaining({ request_id: requestId, result: 'SUCCESS' }),
+    ]);
+
+    expect(await controller.api.monthly.summary('2026-08')).toEqual(before.month);
+    expect(await controller.api.annual.summary('2026')).toEqual(before.annual);
+    expect(await controller.api.monthly.exportCsv('2026-08')).toEqual(before.csv);
+    expect(await controller.api.monthly.print('2026-08')).toEqual(before.print);
+
+    const clockIn = await controller.api.clock.clockIn(command({ employeeId: 'active' }));
+    expect(clockIn.ok).toBe(true);
+    const created = await controller.api.attendance.createShift(command({ employeeId: 'legacy', workDate: '2026-08-11', startAt: at('2026-08-11T00:00:00Z'), endAt: at('2026-08-11T01:00:00Z') }));
+    expect(created.ok).toBe(true);
+    const postUpdateShifts = await all<LocalShift>(dbName, 'shifts');
+    expect(postUpdateShifts.find((row) => row.id === (clockIn.ok ? clockIn.data.shiftId : ''))).toMatchObject({ wage_snapshot: 1400, night_wage_snapshot: 1800 });
+    expect(postUpdateShifts.find((row) => row.id === (created.ok ? created.data.id : ''))).toMatchObject({ wage_snapshot: 1400, night_wage_snapshot: 1800 });
+
+    if (!before.backup.ok) throw new Error('expected backup export');
+    expect((await controller.api.backup.restoreImport(command({ json: before.backup.data.json }))).ok).toBe(true);
+    expect(await all<LocalEmployee>(dbName, 'employees')).toEqual(before.employees);
+    expect(await all<LocalShift>(dbName, 'shifts')).toEqual(before.shifts);
+  });
+
   it('creates an idempotent completed shift with wage snapshots and reflects it in attendance and payroll', async () => {
     const { dbName, controller } = await setup();
     await put(dbName, 'employees', { id: 'existing', name: '既存', hourly_wage: 900, status: 'ACTIVE' } satisfies LocalEmployee);
