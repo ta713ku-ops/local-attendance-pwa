@@ -16,6 +16,11 @@ export interface EmployeeDto {
   restoreUntil: number | null;
 }
 
+export interface EmployeeWageDefaults {
+  hourlyWage: number;
+  nightHourlyWage: number;
+}
+
 export interface ClockEmployeeDto extends Omit<EmployeeDto, 'status'> {
   status: 'ACTIVE' | 'WORKING' | 'CLOCKED_OUT_TODAY';
   startedAt?: number;
@@ -210,7 +215,8 @@ export interface PwaAttendanceApi {
   };
   employees: {
     list(includeArchived?: boolean): Promise<Result<EmployeeDto[]>>;
-    create(input: Command<{ name: string; hourlyWage: number; nightHourlyWage?: number }>): Promise<Result<EmployeeDto>>;
+    defaults(): Promise<Result<EmployeeWageDefaults>>;
+    create(input: Command<{ name: string; hourlyWage?: number; nightHourlyWage?: number }>): Promise<Result<EmployeeDto>>;
     update(input: Command<{ id: string; name?: string; hourlyWage?: number; nightHourlyWage?: number }>): Promise<Result<{ id: string }>>;
     bulkUpdateWages(input: Command<{ hourlyWage: number; nightHourlyWage: number }>): Promise<Result<{ updatedCount: number }>>;
     archive(input: Command<{ id: string }>): Promise<Result<{ id: string; status: 'ARCHIVED' }>>;

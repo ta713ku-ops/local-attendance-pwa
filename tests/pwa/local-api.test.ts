@@ -222,6 +222,9 @@ describe('PWA local API', () => {
     expect((await all<Record<string, unknown>>(dbName, 'logs')).filter((row) => row.kind === 'EMPLOYEE_BULK_WAGE_UPDATE')).toEqual([
       expect.objectContaining({ request_id: requestId, result: 'SUCCESS' }),
     ]);
+    expect(await controller.api.employees.defaults()).toEqual({ ok: true, data: { hourlyWage: 1400, nightHourlyWage: 1800 } });
+    const createdWithDefaults = await controller.api.employees.create(command({ name: '新規初期値' }));
+    expect(createdWithDefaults).toEqual(expect.objectContaining({ ok: true, data: expect.objectContaining({ hourlyWage: 1400, nightHourlyWage: 1800 }) }));
 
     expect(await controller.api.monthly.summary('2026-08')).toEqual(before.month);
     expect(await controller.api.annual.summary('2026')).toEqual(before.annual);
