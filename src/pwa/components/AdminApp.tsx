@@ -68,6 +68,7 @@ function EmployeeEditor({ employee, api, close, saved }: { employee?: EmployeeDt
 type SettingsScreen = 'top'|'pin'|'backup'|'attendance-add'|'attendance-edit'|'bulk-wage';
 function SettingsTab({ api, notify, openBackup, consumeOpenBackup }: { api: PwaAttendanceApi; notify: (value: Notice) => void; openBackup: boolean; consumeOpenBackup: () => void }) {
   const [screen, setScreen] = useState<SettingsScreen>('top');
+  const returnToSettingsTop = useCallback(() => setScreen('top'), []);
   useEffect(() => { if (openBackup) { setScreen('backup'); consumeOpenBackup(); } }, [consumeOpenBackup, openBackup]);
   if (screen === 'top') return <div className="settings-list">
     <button onClick={() => setScreen('attendance-add')}><strong>勤怠の追加</strong><span>打刻忘れの勤務記録を新しく作成します</span></button>
@@ -75,7 +76,7 @@ function SettingsTab({ api, notify, openBackup, consumeOpenBackup }: { api: PwaA
     {[['bulk-wage','時給一括変更','在籍中の従業員全員の通常・深夜時給を変更します'],['pin','管理者PINの変更','現在のPINを確認して変更します'],['backup','バックアップ','端末内の保存と復元を管理します']].map(([id,title,text]) => <button key={id} onClick={() => setScreen(id as SettingsScreen)}><strong>{title}</strong><span>{text}</span></button>)}
   </div>;
   if (screen === 'attendance-add') return <section className="editor-screen"><button className="back" onClick={() => setScreen('top')}>‹ 設定へ戻る</button><h2>勤怠の追加</h2><p className="form-hint">打刻忘れの勤務記録を新しく作成します。</p><ShiftCreateForm api={api} initialDate={dateNow()} saved={async()=>{notify({kind:'success',text:'勤怠を追加しました。'});setScreen('top');}} /></section>;
-  if (screen === 'attendance-edit') return <ShiftCorrectionPicker api={api} notify={notify} close={() => setScreen('top')} saved={() => setScreen('top')} />;
+  if (screen === 'attendance-edit') return <ShiftCorrectionPicker api={api} notify={notify} close={returnToSettingsTop} saved={returnToSettingsTop} />;
   if (screen === 'bulk-wage') return <BulkWageEditor api={api} notify={notify} close={() => setScreen('top')} />;
   return <section><button className="back" onClick={() => setScreen('top')}>‹ 設定へ戻る</button>{screen === 'pin' && <PinChange api={api} notify={notify} />}{screen === 'backup' && <BackupPanel api={api} notify={notify} />}</section>;
 }
@@ -111,7 +112,9 @@ function ShiftCorrectionPicker({api,notify,close,saved}:{api:PwaAttendanceApi;no
   const [employees,setEmployees]=useState<EmployeeDto[]>([]); const [employeeId,setEmployeeId]=useState(''); const [choosingEmployee,setChoosingEmployee]=useState(true); const [shifts,setShifts]=useState<CorrectionListItemDto[]>([]); const [shiftId,setShiftId]=useState<string>(); const [loading,setLoading]=useState(true); const [loadingShifts,setLoadingShifts]=useState(false); const shiftRequest=useRef(0);
   useEffect(()=>{let active=true;void unwrap(api.attendance.correctionEmployees()).then(rows=>{if(active)setEmployees(rows);}).catch(c=>notify({kind:'error',text:c instanceof Error?c.message:'従業員を読み込めませんでした。'})).finally(()=>{if(active)setLoading(false);});return()=>{active=false;};},[api,notify]);
   const select=async(id:string)=>{const request=++shiftRequest.current;setEmployeeId(id);setShifts([]);if(!id){setLoadingShifts(false);return;}setLoadingShifts(true);try{const rows=await unwrap(api.attendance.correctionShifts(id));if(request===shiftRequest.current)setShifts(rows);}catch(c){if(request===shiftRequest.current)notify({kind:'error',text:c instanceof Error?c.message:'勤務を読み込めませんでした。'});}finally{if(request===shiftRequest.current)setLoadingShifts(false);}};
-  if(shiftId)return <ShiftCorrectionEditor shiftId={shiftId} api={api} notify={notify} backLabel="勤務一覧へ戻る" close={()=>setShiftId(undefined)} saved={async()=>saved()} />;
+  const closeEditor = useCallback(() => setShiftId(undefined), []);
+  const saveEditor = useCallback(async () => { await saved(); }, [saved]);
+  if(shiftId)return <ShiftCorrectionEditor shiftId={shiftId} api={api} notify={notify} backLabel="勤務一覧へ戻る" close={closeEditor} saved={saveEditor} />;
   const selectedEmployee=employees.find(employee=>employee.id===employeeId);
   return <section className="editor-screen"><button className="back" onClick={close}>‹ 設定へ戻る</button><h2>勤怠の編集</h2><p className="form-hint">従業員と登録済みの勤務記録を選んでください。</p>{loading?<Loading/>:<>{choosingEmployee?<fieldset className="employee-picker"><legend>従業員</legend><div className="employee-picker-options">{employees.map(employee=><button type="button" key={employee.id} onClick={()=>{setChoosingEmployee(false);void select(employee.id);}}>{employee.name}</button>)}</div></fieldset>:<div className="selected-employee"><span>従業員</span><strong>{selectedEmployee?.name}</strong><button type="button" onClick={()=>setChoosingEmployee(true)}>変更</button></div>}{loadingShifts?<Loading/>:employeeId&&!shifts.length?<Empty title="編集できる勤務記録はありません" />:<div className="card-list correction-list">{shifts.map(shift=><button className="shift-card" key={shift.shiftId} onClick={()=>setShiftId(shift.shiftId)}><strong>{shift.workDate}</strong><span>{hm(shift.effectiveClockIn)}〜{hm(shift.effectiveClockOut)}</span><em>{shift.corrected?'訂正済み':shift.legacyPending?'旧承認待ち':'選択'}</em></button>)}</div>}</>}</section>;
 }
